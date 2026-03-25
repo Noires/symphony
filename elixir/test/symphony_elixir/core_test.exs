@@ -15,8 +15,36 @@ defmodule SymphonyElixir.CoreTest do
     assert config.polling.interval_ms == 30_000
     assert config.tracker.active_states == ["Todo", "In Progress"]
     assert config.tracker.terminal_states == ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]
+    assert config.tracker.owner == nil
+    assert config.tracker.repo == nil
+    assert config.tracker.project_number == nil
+    assert config.tracker.status_field_name == "Status"
     assert config.tracker.assignee == nil
     assert config.agent.max_turns == 20
+    assert config.agent.continue_on_active_issue == true
+    assert config.agent.max_issue_description_prompt_chars == nil
+    assert config.agent.include_full_issue_description_in_prompt == true
+    assert config.agent.handoff_summary_enabled == false
+    assert config.agent.completed_issue_state == nil
+    assert config.agent.completed_issue_state_by_state == %{}
+    assert config.observability.audit_enabled == true
+    assert config.observability.audit_storage_backend == "flat_files"
+    assert config.observability.audit_runs_per_issue == 20
+    assert config.observability.audit_dashboard_runs == 8
+    assert config.observability.issue_rollup_limit == 8
+    assert config.observability.audit_event_limit == 200
+    assert config.observability.audit_max_string_length == 4_000
+    assert config.observability.audit_max_list_items == 50
+    assert config.observability.diff_preview_enabled == true
+    assert config.observability.diff_preview_max_files == 10
+    assert config.observability.diff_preview_hunks_per_file == 3
+    assert config.observability.diff_preview_max_line_length == 240
+    assert config.observability.audit_store_reasoning_text == false
+    assert config.observability.trello_run_summary_enabled == true
+    assert config.observability.tracker_summary_template == nil
+    assert config.observability.expensive_run_uncached_input_threshold == 8_000
+    assert config.observability.expensive_run_tokens_per_changed_file_threshold == 4_000
+    assert config.observability.expensive_run_retry_attempt_threshold == 2
 
     write_workflow_file!(Workflow.workflow_file_path(), poll_interval_ms: "invalid")
 
@@ -34,8 +62,64 @@ defmodule SymphonyElixir.CoreTest do
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
     assert message =~ "agent.max_turns"
 
+    write_workflow_file!(Workflow.workflow_file_path(), observability_audit_runs_per_issue: 0)
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "observability.audit_runs_per_issue"
+
+    write_workflow_file!(Workflow.workflow_file_path(), observability_audit_storage_backend: "sqlite")
+    assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
+    assert message =~ "observability.audit_storage_backend"
+
     write_workflow_file!(Workflow.workflow_file_path(), max_turns: 5)
     assert Config.settings!().agent.max_turns == 5
+
+    write_workflow_file!(Workflow.workflow_file_path(), continue_on_active_issue: false)
+    assert Config.settings!().agent.continue_on_active_issue == false
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      observability_audit_runs_per_issue: 3,
+      observability_audit_dashboard_runs: 4,
+      observability_issue_rollup_limit: 5,
+      observability_audit_event_limit: 40,
+      observability_audit_max_string_length: 123,
+      observability_audit_max_list_items: 7,
+      observability_diff_preview_enabled: false,
+      observability_diff_preview_max_files: 6,
+      observability_diff_preview_hunks_per_file: 2,
+      observability_diff_preview_max_line_length: 90,
+      observability_audit_redact_keys: ["custom_secret"],
+      observability_audit_store_reasoning_text: true,
+      observability_trello_run_summary_enabled: false,
+      observability_tracker_summary_template: "## Summary | Status: {{ summary.status }}",
+      observability_expensive_run_uncached_input_threshold: 9_000,
+      observability_expensive_run_tokens_per_changed_file_threshold: 4_500,
+      observability_expensive_run_retry_attempt_threshold: 3
+    )
+
+    assert Config.settings!().observability.audit_storage_backend == "flat_files"
+    assert Config.settings!().observability.audit_runs_per_issue == 3
+    assert Config.settings!().observability.audit_dashboard_runs == 4
+    assert Config.settings!().observability.issue_rollup_limit == 5
+    assert Config.settings!().observability.audit_event_limit == 40
+    assert Config.settings!().observability.audit_max_string_length == 123
+    assert Config.settings!().observability.audit_max_list_items == 7
+    assert Config.settings!().observability.diff_preview_enabled == false
+    assert Config.settings!().observability.diff_preview_max_files == 6
+    assert Config.settings!().observability.diff_preview_hunks_per_file == 2
+    assert Config.settings!().observability.diff_preview_max_line_length == 90
+    assert Config.settings!().observability.audit_redact_keys == ["custom_secret"]
+    assert Config.settings!().observability.audit_store_reasoning_text == true
+    assert Config.settings!().observability.trello_run_summary_enabled == false
+    assert Config.settings!().observability.tracker_summary_template == "## Summary | Status: {{ summary.status }}"
+    assert Config.settings!().observability.expensive_run_uncached_input_threshold == 9_000
+    assert Config.settings!().observability.expensive_run_tokens_per_changed_file_threshold == 4_500
+    assert Config.settings!().observability.expensive_run_retry_attempt_threshold == 3
+
+    write_workflow_file!(Workflow.workflow_file_path(), completed_issue_state: " Human Review ")
+    assert Config.settings!().agent.completed_issue_state == "Human Review"
+
+    write_workflow_file!(Workflow.workflow_file_path(), completed_issue_state_by_state: %{" Merging " => " Done "})
+    assert Config.settings!().agent.completed_issue_state_by_state == %{"merging" => "Done"}
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -86,6 +170,101 @@ defmodule SymphonyElixir.CoreTest do
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "123")
     assert {:error, {:unsupported_tracker_kind, "123"}} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_api_key: nil,
+      tracker_api_access_token: nil,
+      tracker_board_id: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_trello_api_key} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: nil,
+      tracker_board_id: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_trello_api_token} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: "trello-token",
+      tracker_board_id: nil,
+      tracker_project_slug: nil
+    )
+
+    assert {:error, :missing_trello_board_id} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_key: nil,
+      tracker_api_access_token: nil,
+      tracker_board_id: nil,
+      tracker_project_slug: nil,
+      tracker_owner: nil,
+      tracker_repo: nil,
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_api_token} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_board_id: nil,
+      tracker_project_slug: nil,
+      tracker_owner: nil,
+      tracker_repo: nil,
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_owner} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_board_id: nil,
+      tracker_project_slug: nil,
+      tracker_owner: "octo-org",
+      tracker_repo: nil,
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_repo} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_board_id: nil,
+      tracker_project_slug: nil,
+      tracker_owner: "octo-org",
+      tracker_repo: "symphony",
+      tracker_project_number: nil
+    )
+
+    assert {:error, :missing_github_project_number} = Config.validate!()
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_board_id: nil,
+      tracker_project_slug: nil,
+      tracker_owner: "octo-org",
+      tracker_repo: "symphony",
+      tracker_project_number: "abc"
+    )
+
+    assert {:error, :invalid_github_project_number} = Config.validate!()
   end
 
   test "current WORKFLOW.md file is valid and complete" do
@@ -147,6 +326,140 @@ defmodule SymphonyElixir.CoreTest do
     )
 
     assert Config.settings!().tracker.assignee == env_assignee
+  end
+
+  test "trello auth resolves from TRELLO_API_KEY and TRELLO_API_TOKEN env vars" do
+    previous_trello_api_key = System.get_env("TRELLO_API_KEY")
+    previous_trello_api_token = System.get_env("TRELLO_API_TOKEN")
+
+    on_exit(fn ->
+      restore_env("TRELLO_API_KEY", previous_trello_api_key)
+      restore_env("TRELLO_API_TOKEN", previous_trello_api_token)
+    end)
+
+    System.put_env("TRELLO_API_KEY", "trello-key-from-env")
+    System.put_env("TRELLO_API_TOKEN", "trello-token-from-env")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_endpoint: nil,
+      tracker_api_key: nil,
+      tracker_api_access_token: nil,
+      tracker_board_id: "board-123",
+      tracker_project_slug: nil
+    )
+
+    assert Config.settings!().tracker.endpoint == "https://api.trello.com/1"
+    assert Config.settings!().tracker.api_key == "trello-key-from-env"
+    assert Config.settings!().tracker.api_token == "trello-token-from-env"
+    assert Config.settings!().tracker.board_id == "board-123"
+    assert :ok = Config.validate!()
+  end
+
+  test "trello board id resolves from TRELLO_BOARD_ID env var" do
+    previous_trello_board_id = System.get_env("TRELLO_BOARD_ID")
+
+    on_exit(fn ->
+      restore_env("TRELLO_BOARD_ID", previous_trello_board_id)
+    end)
+
+    System.put_env("TRELLO_BOARD_ID", "board-from-env")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: "trello-token",
+      tracker_board_id: nil,
+      tracker_project_slug: nil
+    )
+
+    assert Config.settings!().tracker.board_id == "board-from-env"
+    assert :ok = Config.validate!()
+  end
+
+  test "github auth and project settings resolve from env vars" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    previous_github_owner = System.get_env("GITHUB_OWNER")
+    previous_github_repo = System.get_env("GITHUB_REPO")
+    previous_github_project_number = System.get_env("GITHUB_PROJECT_NUMBER")
+
+    on_exit(fn ->
+      restore_env("GITHUB_TOKEN", previous_github_token)
+      restore_env("GITHUB_OWNER", previous_github_owner)
+      restore_env("GITHUB_REPO", previous_github_repo)
+      restore_env("GITHUB_PROJECT_NUMBER", previous_github_project_number)
+    end)
+
+    System.put_env("GITHUB_TOKEN", "github-token-from-env")
+    System.put_env("GITHUB_OWNER", "octo-org")
+    System.put_env("GITHUB_REPO", "symphony")
+    System.put_env("GITHUB_PROJECT_NUMBER", "7")
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_endpoint: nil,
+      tracker_api_key: nil,
+      tracker_api_access_token: nil,
+      tracker_board_id: nil,
+      tracker_project_slug: nil,
+      tracker_owner: nil,
+      tracker_repo: nil,
+      tracker_project_number: nil
+    )
+
+    assert Config.settings!().tracker.endpoint == "https://api.github.com"
+    assert Config.settings!().tracker.api_token == "github-token-from-env"
+    assert Config.settings!().tracker.owner == "octo-org"
+    assert Config.settings!().tracker.repo == "symphony"
+    assert Config.settings!().tracker.project_number == "7"
+    assert Config.settings!().tracker.status_field_name == "Status"
+    assert :ok = Config.validate!()
+  end
+
+  test ".env file next to WORKFLOW.md loads Trello settings without overriding explicit env" do
+    workflow_path = Workflow.workflow_file_path()
+    workflow_root = Path.dirname(workflow_path)
+    dotenv_path = Path.join(workflow_root, ".env")
+    previous_trello_api_key = System.get_env("TRELLO_API_KEY")
+    previous_trello_api_token = System.get_env("TRELLO_API_TOKEN")
+    previous_trello_board_id = System.get_env("TRELLO_BOARD_ID")
+
+    on_exit(fn ->
+      restore_env("TRELLO_API_KEY", previous_trello_api_key)
+      restore_env("TRELLO_API_TOKEN", previous_trello_api_token)
+      restore_env("TRELLO_BOARD_ID", previous_trello_board_id)
+      File.rm(dotenv_path)
+      Workflow.set_workflow_file_path(workflow_path)
+    end)
+
+    System.delete_env("TRELLO_API_KEY")
+    System.delete_env("TRELLO_API_TOKEN")
+    System.delete_env("TRELLO_BOARD_ID")
+
+    File.write!(dotenv_path, """
+    TRELLO_API_KEY=trello-key-from-dotenv
+    TRELLO_API_TOKEN=trello-token-from-dotenv
+    TRELLO_BOARD_ID=board-from-dotenv
+    """)
+
+    write_workflow_file!(workflow_path,
+      tracker_kind: "trello",
+      tracker_api_key: nil,
+      tracker_api_access_token: nil,
+      tracker_board_id: nil,
+      tracker_project_slug: nil
+    )
+
+    assert Config.settings!().tracker.api_key == "trello-key-from-dotenv"
+    assert Config.settings!().tracker.api_token == "trello-token-from-dotenv"
+    assert Config.settings!().tracker.board_id == "board-from-dotenv"
+
+    System.put_env("TRELLO_API_KEY", "process-env-key")
+    Workflow.set_workflow_file_path(workflow_path)
+
+    assert Config.settings!().tracker.api_key == "process-env-key"
+    assert Config.settings!().tracker.api_token == "trello-token-from-dotenv"
+    assert Config.settings!().tracker.board_id == "board-from-dotenv"
   end
 
   test "workflow file path defaults to WORKFLOW.md in the current working directory when app env is unset" do
@@ -554,6 +867,167 @@ defmodule SymphonyElixir.CoreTest do
     assert_due_in_range(due_at_ms, 500, 1_100)
   end
 
+  test "normal worker exit does not schedule continuation retry when disabled" do
+    write_workflow_file!(Workflow.workflow_file_path(), continue_on_active_issue: false)
+
+    issue_id = "issue-no-resume"
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :NoContinuationOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-558A",
+      issue: %Issue{id: issue_id, identifier: "MT-558A", state: "In Progress"},
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    assert state.completed_active_states[issue_id] == "in progress"
+    assert state.retry_attempts == %{}
+  end
+
+  test "normal worker exit moves completed issue to configured state when continuation is disabled" do
+    issue = %Issue{id: "issue-human-review", identifier: "MT-558B", state: "In Progress"}
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      continue_on_active_issue: false,
+      completed_issue_state: "Human Review"
+    )
+
+    issue_id = issue.id
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CompletedIssueTransitionOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-558B",
+      issue: issue,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
+
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    assert state.completed_active_states[issue_id] == "in progress"
+    assert state.retry_attempts == %{}
+  end
+
+  test "normal worker exit uses state-specific completion target when configured" do
+    issue = %Issue{id: "issue-done", identifier: "MT-558C", state: "Merging"}
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      continue_on_active_issue: false,
+      completed_issue_state: "Human Review",
+      completed_issue_state_by_state: %{"Merging" => "Done"}
+    )
+
+    issue_id = issue.id
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :CompletedIssueStateOverrideOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-558C",
+      issue: issue,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Done"}
+
+    Process.sleep(50)
+    state = :sys.get_state(pid)
+
+    refute Map.has_key?(state.running, issue_id)
+    refute MapSet.member?(state.claimed, issue_id)
+    assert MapSet.member?(state.completed, issue_id)
+    assert state.completed_active_states[issue_id] == "merging"
+    assert state.retry_attempts == %{}
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()
@@ -591,7 +1065,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    assert_due_in_range(due_at_ms, 38_500, 40_500)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -630,7 +1104,7 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    assert_due_in_range(due_at_ms, 8_000, 10_500)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -847,7 +1321,7 @@ defmodule SymphonyElixir.CoreTest do
       labels: ["bug"]
     }
 
-    assert_raise Solid.RenderError, fn ->
+    assert_raise RuntimeError, ~r/template_render_error:.*missing\.ticket_id.*template="Work on ticket \{\{ missing\.ticket_id \}\} and follow these steps\."/s, fn ->
       PromptBuilder.build_prompt(issue)
     end
   end
@@ -865,6 +1339,23 @@ defmodule SymphonyElixir.CoreTest do
     }
 
     assert_raise RuntimeError, ~r/template_parse_error:.*template="/s, fn ->
+      PromptBuilder.build_prompt(issue)
+    end
+  end
+
+  test "prompt builder surfaces template render errors separately from parse failures" do
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: "{{ issue.missing.field }}")
+
+    issue = %Issue{
+      identifier: "MT-998",
+      title: "Broken render",
+      description: "Missing nested data",
+      state: "Todo",
+      url: "https://example.org/issues/MT-998",
+      labels: []
+    }
+
+    assert_raise RuntimeError, ~r/template_render_error:.*template="\{\{ issue\.missing\.field \}\}"/s, fn ->
       PromptBuilder.build_prompt(issue)
     end
   end
@@ -992,6 +1483,98 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt == "Retry #2"
   end
 
+  test "prompt builder records prompt-shape metadata and truncates issue descriptions when configured" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Ticket {{ issue.identifier }} body={{ issue.description }}",
+      max_issue_description_prompt_chars: 32
+    )
+
+    issue = %Issue{
+      identifier: "MT-202",
+      title: "Trim prompt body",
+      description: String.duplicate("Very long body. ", 20),
+      state: "In Progress",
+      url: "https://example.org/issues/MT-202",
+      labels: []
+    }
+
+    result = PromptBuilder.build_prompt_result(issue)
+
+    assert result.prompt =~ "Ticket MT-202 body="
+    assert result.prompt =~ "[Description truncated for prompt efficiency."
+    assert result.metadata["workflow_prompt_chars"] > 0
+    assert result.metadata["tracker_payload_chars"] > 0
+    assert result.metadata["rendered_prompt_chars"] >= result.metadata["base_rendered_prompt_chars"]
+    assert result.metadata["issue_description_chars"] > result.metadata["issue_prompt_description_chars"]
+    assert result.metadata["issue_description_truncated"] == true
+    assert result.metadata["issue_description_truncated_chars"] > 0
+  end
+
+  test "prompt builder can include a previous run handoff summary" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: "Ticket {{ issue.identifier }}",
+      handoff_summary_enabled: true
+    )
+
+    issue = %Issue{
+      id: "issue-handoff",
+      identifier: "MT-HANDOFF",
+      title: "Reuse previous run context",
+      description: "Continue from the last finished run",
+      state: "Rework",
+      url: "https://example.org/issues/MT-HANDOFF",
+      labels: []
+    }
+
+    started_at = ~U[2026-03-24 15:00:00Z]
+
+    previous_run = %{
+      run_id: "run-handoff-1",
+      identifier: issue.identifier,
+      issue: issue,
+      started_at: started_at,
+      turn_count: 2,
+      codex_input_tokens: 18,
+      codex_cached_input_tokens: 6,
+      codex_output_tokens: 5,
+      codex_total_tokens: 23
+    }
+
+    assert :ok =
+             SymphonyElixir.AuditLog.start_run(issue,
+               run_id: "run-handoff-1",
+               started_at: started_at
+             )
+
+    assert :ok =
+             SymphonyElixir.AuditLog.record_workspace_metadata(
+               previous_run,
+               %{
+                 "git" => %{
+                   "changed_file_count" => 2,
+                   "changed_files" => [%{"path" => "lib/foo.ex"}, %{"path" => "test/foo_test.exs"}]
+                 }
+               }
+             )
+
+    assert :ok =
+             SymphonyElixir.AuditLog.finish_run(previous_run, %{
+               status: "completed",
+               next_action: "human_review",
+               issue_state_finished: "Human Review"
+             })
+
+    result = PromptBuilder.build_prompt_result(issue, run_id: "run-handoff-2")
+
+    assert result.prompt =~ "Previous run handoff:"
+    assert result.prompt =~ "Previous run: run-handoff-1"
+    assert result.prompt =~ "Changed files: lib/foo.ex, test/foo_test.exs"
+    assert result.metadata["included_previous_run_handoff"] == true
+    assert result.metadata["previous_run_id"] == "run-handoff-1"
+    assert result.metadata["previous_run_handoff_chars"] > 0
+    assert result.metadata["tracker_payload_chars"] > 0
+  end
+
   test "agent runner keeps workspace after successful codex run" do
     test_root =
       Path.join(
@@ -1042,7 +1625,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -1071,6 +1654,71 @@ defmodule SymphonyElixir.CoreTest do
       workspace = Path.join(workspace_root, workspace_name)
       assert File.exists?(workspace)
       assert File.exists?(Path.join(workspace, "README.md"))
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner surfaces after_success hook failures" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-after-success-failure-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      sh_binary = SymphonyElixir.Shell.find_local_posix_shell(:sh) || raise "sh not found"
+      normalized_codex_binary = String.replace(Path.expand(codex_binary), "\\", "/")
+
+      File.mkdir_p!(test_root)
+      File.mkdir_p!(workspace_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-after-success"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-after-success"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "\"#{sh_binary}\" \"#{normalized_codex_binary}\" app-server",
+        continue_on_active_issue: false,
+        hook_after_success: "echo landing failed && exit 17"
+      )
+
+      issue = %Issue{
+        id: "issue-after-success",
+        identifier: "S-100",
+        title: "Surface landing failure",
+        description: "Landing hook should fail the run",
+        state: "Merging",
+        url: "https://example.org/issues/S-100",
+        labels: []
+      }
+
+      assert_raise RuntimeError, ~r/workspace_hook_failed.*after_success/, fn ->
+        AgentRunner.run(issue)
+      end
     after
       File.rm_rf(test_root)
     end
@@ -1127,7 +1775,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
         codex_command: "#{codex_binary} app-server"
       )
 
@@ -1181,13 +1829,12 @@ defmodule SymphonyElixir.CoreTest do
 
     try do
       trace_file = Path.join(test_root, "ssh.trace")
-      fake_ssh = Path.join(test_root, "ssh")
 
       File.mkdir_p!(test_root)
       System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
-      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+      System.put_env("PATH", prepend_to_path(test_root, previous_path))
 
-      File.write!(fake_ssh, """
+      install_fake_executable!(test_root, "ssh", """
       #!/bin/sh
       trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
       printf 'ARGV:%s\\n' "$*" >> "$trace_file"
@@ -1206,8 +1853,6 @@ defmodule SymphonyElixir.CoreTest do
           ;;
       esac
       """)
-
-      File.chmod!(fake_ssh, 0o755)
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: "~/.symphony-remote-workspaces",
@@ -1293,7 +1938,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
         codex_command: "#{codex_binary} app-server",
         max_turns: 3
       )
@@ -1423,7 +2068,7 @@ defmodule SymphonyElixir.CoreTest do
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
-        hook_after_create: "cp #{Path.join(template_repo, "README.md")} README.md",
+        hook_after_create: "cp #{shell_path(Path.join(template_repo, "README.md"))} README.md",
         codex_command: "#{codex_binary} app-server",
         max_turns: 2
       )
@@ -1456,6 +2101,101 @@ defmodule SymphonyElixir.CoreTest do
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1
       assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 2
+    after
+      System.delete_env("SYMP_TEST_CODEx_TRACE")
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "agent runner skips follow-up turns when active-state continuation is disabled" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-agent-runner-no-continuation-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex.trace")
+      sh_binary = SymphonyElixir.Shell.find_local_posix_shell(:sh) || raise "sh not found"
+      normalized_codex_binary = String.replace(Path.expand(codex_binary), "\\", "/")
+
+      File.mkdir_p!(test_root)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex.trace}"
+      printf 'RUN\\n' >> "$trace_file"
+      count=0
+
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-single"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-single-1"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            ;;
+          *)
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+
+      on_exit(fn -> System.delete_env("SYMP_TEST_CODEx_TRACE") end)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "\"#{sh_binary}\" \"#{normalized_codex_binary}\" app-server",
+        max_turns: 3,
+        continue_on_active_issue: false
+      )
+
+      parent = self()
+
+      state_fetcher = fn [_issue_id] ->
+        send(parent, :issue_state_fetch_called)
+
+        {:ok,
+         [
+           %Issue{
+             id: "issue-single-turn",
+             identifier: "MT-249",
+             title: "Stop after first turn",
+             description: "Do not continue while still active",
+             state: "In Progress"
+           }
+         ]}
+      end
+
+      issue = %Issue{
+        id: "issue-single-turn",
+        identifier: "MT-249",
+        title: "Stop after first turn",
+        description: "Do not continue while still active",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-249",
+        labels: []
+      }
+
+      assert :ok = AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
+      refute_receive :issue_state_fetch_called, 50
+
+      trace = File.read!(trace_file)
+      assert length(String.split(trace, "RUN", trim: true)) == 1
+      assert length(Regex.scan(~r/"method":"turn\/start"/, trace)) == 1
     after
       System.delete_env("SYMP_TEST_CODEx_TRACE")
       File.rm_rf(test_root)

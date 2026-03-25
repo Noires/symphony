@@ -47,6 +47,19 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec fetch_human_response_marker(String.t(), keyword()) :: {:ok, map() | nil} | {:error, term()}
+  def fetch_human_response_marker(issue_id, _opts \\ []) when is_binary(issue_id) do
+    markers = Application.get_env(:symphony_elixir, :memory_tracker_human_response_markers, %{})
+
+    marker =
+      case markers do
+        %{} -> Map.get(markers, issue_id)
+        _ -> nil
+      end
+
+    {:ok, marker}
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

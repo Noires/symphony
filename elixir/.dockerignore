@@ -1,0 +1,14 @@
+_build
+deps
+log
+logs
+tmp
+test
+.env
+.env.*
+docker-data
+mix-test-*.log
+ssh-subset.log
+erl_crash.dump
+.elixir_ls
+.fetch

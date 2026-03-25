@@ -73,6 +73,11 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
+  @spec fetch_human_response_marker(String.t(), keyword()) :: {:ok, map() | nil} | {:error, term()}
+  def fetch_human_response_marker(_issue_id, _opts \\ []) do
+    {:ok, nil}
+  end
+
   defp client_module do
     Application.get_env(:symphony_elixir, :linear_client_module, Client)
   end

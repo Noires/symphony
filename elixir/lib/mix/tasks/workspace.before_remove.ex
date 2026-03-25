@@ -1,6 +1,8 @@
 defmodule Mix.Tasks.Workspace.BeforeRemove do
   use Mix.Task
 
+  alias SymphonyElixir.Shell
+
   @shortdoc "Close open GitHub PRs for the current branch before workspace removal"
 
   @moduledoc """
@@ -131,10 +133,42 @@ defmodule Mix.Tasks.Workspace.BeforeRemove do
         {:error, {:enoent, ""}}
 
       path ->
-        case System.cmd(path, args, stderr_to_stdout: true) do
+        {executable, invocation_args} =
+          case windows_script_or_cmd_invocation(path, args) do
+            {:ok, cmd_executable, cmd_args} -> {cmd_executable, cmd_args}
+            :error -> {path, args}
+          end
+
+        case System.cmd(executable, invocation_args, stderr_to_stdout: true) do
           {output, 0} -> {:ok, output}
           {output, status} -> {:error, {status, output}}
         end
     end
+  end
+
+  defp windows_script_or_cmd_invocation(path, args) when is_binary(path) and is_list(args) do
+    if match?({:win32, _}, :os.type()) and String.downcase(Path.extname(path)) in [".cmd", ".bat"] do
+      script_path = Path.rootname(path)
+
+      cond do
+        File.exists?(script_path) ->
+          sh_path = Shell.find_local_posix_shell(:sh) || raise "sh not found"
+          {:ok, sh_path, [script_path | args]}
+
+        true ->
+          {:ok, System.find_executable("cmd") || "cmd.exe", ["/d", "/s", "/c", cmd_command_line(path, args)]}
+      end
+    else
+      :error
+    end
+  end
+
+  defp cmd_command_line(path, args) do
+    [path | Enum.map(args, &cmd_escape/1)]
+    |> Enum.join(" ")
+  end
+
+  defp cmd_escape(value) when is_binary(value) do
+    "\"" <> String.replace(value, "\"", "\"\"") <> "\""
   end
 end

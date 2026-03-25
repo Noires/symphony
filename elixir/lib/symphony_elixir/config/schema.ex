@@ -46,9 +46,15 @@ defmodule SymphonyElixir.Config.Schema do
 
     embedded_schema do
       field(:kind, :string)
-      field(:endpoint, :string, default: "https://api.linear.app/graphql")
+      field(:endpoint, :string)
       field(:api_key, :string)
+      field(:api_token, :string)
       field(:project_slug, :string)
+      field(:board_id, :string)
+      field(:owner, :string)
+      field(:repo, :string)
+      field(:project_number, :string)
+      field(:status_field_name, :string, default: "Status")
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
@@ -59,7 +65,21 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [
+          :kind,
+          :endpoint,
+          :api_key,
+          :api_token,
+          :project_slug,
+          :board_id,
+          :owner,
+          :repo,
+          :project_number,
+          :status_field_name,
+          :assignee,
+          :active_states,
+          :terminal_states
+        ],
         empty_values: []
       )
     end
@@ -130,6 +150,12 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
+      field(:continue_on_active_issue, :boolean, default: true)
+      field(:max_issue_description_prompt_chars, :integer)
+      field(:include_full_issue_description_in_prompt, :boolean, default: true)
+      field(:handoff_summary_enabled, :boolean, default: false)
+      field(:completed_issue_state, :string)
+      field(:completed_issue_state_by_state, :map, default: %{})
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
     end
@@ -139,13 +165,27 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :continue_on_active_issue,
+          :max_issue_description_prompt_chars,
+          :include_full_issue_description_in_prompt,
+          :handoff_summary_enabled,
+          :completed_issue_state,
+          :completed_issue_state_by_state,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state
+        ],
         empty_values: []
       )
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
+      |> validate_number(:max_issue_description_prompt_chars, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> update_change(:completed_issue_state_by_state, &Schema.normalize_completed_issue_state_overrides/1)
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
+      |> Schema.validate_completed_issue_state_overrides(:completed_issue_state_by_state)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end
   end
@@ -208,6 +248,7 @@ defmodule SymphonyElixir.Config.Schema do
     embedded_schema do
       field(:after_create, :string)
       field(:before_run, :string)
+      field(:after_success, :string)
       field(:after_run, :string)
       field(:before_remove, :string)
       field(:timeout_ms, :integer, default: 60_000)
@@ -216,7 +257,7 @@ defmodule SymphonyElixir.Config.Schema do
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:after_create, :before_run, :after_run, :before_remove, :timeout_ms], empty_values: [])
+      |> cast(attrs, [:after_create, :before_run, :after_success, :after_run, :before_remove, :timeout_ms], empty_values: [])
       |> validate_number(:timeout_ms, greater_than: 0)
     end
   end
@@ -225,20 +266,119 @@ defmodule SymphonyElixir.Config.Schema do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+    alias SymphonyElixir.Config.Schema
 
     @primary_key false
     embedded_schema do
       field(:dashboard_enabled, :boolean, default: true)
       field(:refresh_ms, :integer, default: 1_000)
       field(:render_interval_ms, :integer, default: 16)
+      field(:audit_enabled, :boolean, default: true)
+      field(:audit_storage_backend, :string, default: "flat_files")
+      field(:audit_runs_per_issue, :integer, default: 20)
+      field(:audit_dashboard_runs, :integer, default: 8)
+      field(:issue_rollup_limit, :integer, default: 8)
+      field(:audit_event_limit, :integer, default: 200)
+      field(:audit_max_string_length, :integer, default: 4_000)
+      field(:audit_max_list_items, :integer, default: 50)
+      field(:diff_preview_enabled, :boolean, default: true)
+      field(:diff_preview_max_files, :integer, default: 10)
+      field(:diff_preview_hunks_per_file, :integer, default: 3)
+      field(:diff_preview_max_line_length, :integer, default: 240)
+      field(:audit_redact_keys, {:array, :string}, default: ["api_key", "api_token", "token", "secret", "password", "authorization", "cookie", "auth"])
+      field(:audit_store_reasoning_text, :boolean, default: false)
+      field(:trello_run_summary_enabled, :boolean, default: true)
+      field(:tracker_summary_template, :string)
+      field(:expensive_run_uncached_input_threshold, :integer, default: 8_000)
+      field(:expensive_run_tokens_per_changed_file_threshold, :integer, default: 4_000)
+      field(:expensive_run_retry_attempt_threshold, :integer, default: 2)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:dashboard_enabled, :refresh_ms, :render_interval_ms], empty_values: [])
+      |> cast(
+        attrs,
+        [
+          :dashboard_enabled,
+          :refresh_ms,
+          :render_interval_ms,
+          :audit_enabled,
+          :audit_storage_backend,
+          :audit_runs_per_issue,
+          :audit_dashboard_runs,
+          :issue_rollup_limit,
+          :audit_event_limit,
+          :audit_max_string_length,
+          :audit_max_list_items,
+          :diff_preview_enabled,
+          :diff_preview_max_files,
+          :diff_preview_hunks_per_file,
+          :diff_preview_max_line_length,
+          :audit_redact_keys,
+          :audit_store_reasoning_text,
+          :trello_run_summary_enabled,
+          :tracker_summary_template,
+          :expensive_run_uncached_input_threshold,
+          :expensive_run_tokens_per_changed_file_threshold,
+          :expensive_run_retry_attempt_threshold
+        ],
+        empty_values: []
+      )
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:render_interval_ms, greater_than: 0)
+      |> validate_number(:audit_runs_per_issue, greater_than: 0)
+      |> validate_number(:audit_dashboard_runs, greater_than: 0)
+      |> validate_number(:issue_rollup_limit, greater_than: 0)
+      |> validate_number(:audit_event_limit, greater_than: 0)
+      |> validate_number(:audit_max_string_length, greater_than: 0)
+      |> validate_number(:audit_max_list_items, greater_than: 0)
+      |> validate_number(:diff_preview_max_files, greater_than: 0)
+      |> validate_number(:diff_preview_hunks_per_file, greater_than: 0)
+      |> validate_number(:diff_preview_max_line_length, greater_than: 0)
+      |> validate_number(:expensive_run_uncached_input_threshold, greater_than: 0)
+      |> validate_number(:expensive_run_tokens_per_changed_file_threshold, greater_than: 0)
+      |> validate_number(:expensive_run_retry_attempt_threshold, greater_than_or_equal_to: 0)
+      |> validate_inclusion(:audit_storage_backend, ["flat_files"])
+      |> update_change(:audit_redact_keys, &Schema.normalize_redact_keys/1)
+      |> update_change(:tracker_summary_template, &Schema.normalize_string_value/1)
+    end
+  end
+
+  defmodule Guardrails do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:operator_token, :string)
+      field(:default_review_mode, :string, default: "review")
+      field(:builtin_rule_preset, :string, default: "safe")
+      field(:full_access_run_ttl_ms, :integer, default: 3_600_000)
+      field(:full_access_workflow_ttl_ms, :integer, default: 28_800_000)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :operator_token,
+          :default_review_mode,
+          :builtin_rule_preset,
+          :full_access_run_ttl_ms,
+          :full_access_workflow_ttl_ms
+        ],
+        empty_values: []
+      )
+      |> validate_inclusion(:default_review_mode, ["review", "deny"])
+      |> validate_inclusion(:builtin_rule_preset, ["safe", "off"])
+      |> validate_number(:full_access_run_ttl_ms, greater_than: 0)
+      |> validate_number(:full_access_workflow_ttl_ms, greater_than: 0)
     end
   end
 
@@ -270,6 +410,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:guardrails, Guardrails, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
 
@@ -333,6 +474,42 @@ defmodule SymphonyElixir.Config.Schema do
   end
 
   @doc false
+  @spec normalize_completed_issue_state_overrides(nil | map()) :: map()
+  def normalize_completed_issue_state_overrides(nil), do: %{}
+
+  def normalize_completed_issue_state_overrides(overrides) when is_map(overrides) do
+    Enum.reduce(overrides, %{}, fn {state_name, completed_state}, acc ->
+      normalized_completed_state =
+        completed_state
+        |> to_string()
+        |> normalize_string_value()
+
+      normalized_state_name =
+        state_name
+        |> to_string()
+        |> String.trim()
+        |> normalize_issue_state()
+
+      Map.put(acc, normalized_state_name, normalized_completed_state)
+    end)
+  end
+
+  def normalize_completed_issue_state_overrides(_overrides), do: %{}
+
+  @doc false
+  @spec normalize_redact_keys(nil | [term()]) :: [String.t()]
+  def normalize_redact_keys(nil), do: []
+
+  def normalize_redact_keys(keys) when is_list(keys) do
+    keys
+    |> Enum.map(&(to_string(&1) |> String.trim() |> String.downcase()))
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.uniq()
+  end
+
+  def normalize_redact_keys(_keys), do: []
+
+  @doc false
   @spec validate_state_limits(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
   def validate_state_limits(changeset, field) do
     validate_change(changeset, field, fn ^field, limits ->
@@ -343,6 +520,25 @@ defmodule SymphonyElixir.Config.Schema do
 
           not is_integer(limit) or limit <= 0 ->
             [{field, "limits must be positive integers"}]
+
+          true ->
+            []
+        end
+      end)
+    end)
+  end
+
+  @doc false
+  @spec validate_completed_issue_state_overrides(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
+  def validate_completed_issue_state_overrides(changeset, field) do
+    validate_change(changeset, field, fn ^field, overrides ->
+      Enum.flat_map(overrides, fn {state_name, completed_state} ->
+        cond do
+          to_string(state_name) == "" ->
+            [{field, "state names must not be blank"}]
+
+          not is_binary(completed_state) or String.trim(completed_state) == "" ->
+            [{field, "completed states must be non-blank strings"}]
 
           true ->
             []
@@ -362,15 +558,13 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
+    |> cast_embed(:guardrails, with: &Guardrails.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end
 
   defp finalize_settings(settings) do
-    tracker = %{
-      settings.tracker
-      | api_key: resolve_secret_setting(settings.tracker.api_key, System.get_env("LINEAR_API_KEY")),
-        assignee: resolve_secret_setting(settings.tracker.assignee, System.get_env("LINEAR_ASSIGNEE"))
-    }
+    tracker = finalize_tracker_settings(settings.tracker)
+    agent = finalize_agent_settings(settings.agent)
 
     workspace = %{
       settings.workspace
@@ -383,7 +577,110 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    guardrails = %{
+      settings.guardrails
+      | operator_token: resolve_secret_setting(settings.guardrails.operator_token, guardrails_operator_token_env_fallback()),
+        default_review_mode: resolve_string_setting(settings.guardrails.default_review_mode, "review"),
+        builtin_rule_preset: resolve_string_setting(settings.guardrails.builtin_rule_preset, "safe")
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex, guardrails: guardrails}
+  end
+
+  defp finalize_tracker_settings(tracker) do
+    kind = normalize_tracker_kind(tracker.kind) || "linear"
+
+    %{
+      tracker
+      | endpoint: default_tracker_endpoint(tracker.endpoint, kind),
+        api_key: resolve_secret_setting(tracker.api_key, tracker_api_key_env_fallback(kind)),
+        api_token: resolve_secret_setting(tracker.api_token, tracker_api_token_env_fallback(kind)),
+        board_id: resolve_string_setting(tracker.board_id, tracker_board_id_env_fallback(kind)),
+        owner: resolve_string_setting(tracker.owner, tracker_owner_env_fallback(kind)),
+        repo: resolve_string_setting(tracker.repo, tracker_repo_env_fallback(kind)),
+        project_number: resolve_string_setting(tracker.project_number, tracker_project_number_env_fallback(kind)),
+        status_field_name: resolve_string_setting(tracker.status_field_name, "Status"),
+        assignee: resolve_secret_setting(tracker.assignee, tracker_assignee_env_fallback(kind))
+    }
+  end
+
+  defp finalize_agent_settings(agent) do
+    %{
+      agent
+      | completed_issue_state: resolve_string_setting(agent.completed_issue_state, nil),
+        completed_issue_state_by_state: finalize_completed_issue_state_overrides(agent.completed_issue_state_by_state)
+    }
+  end
+
+  defp finalize_completed_issue_state_overrides(overrides) when is_map(overrides) do
+    Enum.reduce(overrides, %{}, fn {state_name, completed_state}, acc ->
+      case normalize_string_value(to_string(completed_state)) do
+        nil ->
+          acc
+
+        normalized_completed_state ->
+          normalized_state_name =
+            state_name
+            |> to_string()
+            |> String.trim()
+            |> normalize_issue_state()
+
+          Map.put(acc, normalized_state_name, normalized_completed_state)
+      end
+    end)
+  end
+
+  defp finalize_completed_issue_state_overrides(_overrides), do: %{}
+
+  defp normalize_tracker_kind(kind) when is_binary(kind) do
+    kind
+    |> String.trim()
+    |> String.downcase()
+  end
+
+  defp normalize_tracker_kind(_kind), do: nil
+
+  defp default_tracker_endpoint(value, kind) when is_binary(value) do
+    case String.trim(value) do
+      "" -> tracker_default_endpoint(kind)
+      endpoint -> endpoint
+    end
+  end
+
+  defp default_tracker_endpoint(_value, kind), do: tracker_default_endpoint(kind)
+
+  defp tracker_default_endpoint("trello"), do: "https://api.trello.com/1"
+  defp tracker_default_endpoint("linear"), do: "https://api.linear.app/graphql"
+  defp tracker_default_endpoint("github"), do: "https://api.github.com"
+  defp tracker_default_endpoint(_kind), do: nil
+
+  defp tracker_api_key_env_fallback("linear"), do: System.get_env("LINEAR_API_KEY")
+  defp tracker_api_key_env_fallback("trello"), do: System.get_env("TRELLO_API_KEY")
+  defp tracker_api_key_env_fallback(_kind), do: nil
+
+  defp tracker_api_token_env_fallback("trello"), do: System.get_env("TRELLO_API_TOKEN")
+  defp tracker_api_token_env_fallback("github"), do: System.get_env("GITHUB_TOKEN")
+  defp tracker_api_token_env_fallback(_kind), do: nil
+
+  defp tracker_board_id_env_fallback("trello"), do: System.get_env("TRELLO_BOARD_ID")
+  defp tracker_board_id_env_fallback(_kind), do: nil
+
+  defp tracker_owner_env_fallback("github"), do: System.get_env("GITHUB_OWNER")
+  defp tracker_owner_env_fallback(_kind), do: nil
+
+  defp tracker_repo_env_fallback("github"), do: System.get_env("GITHUB_REPO")
+  defp tracker_repo_env_fallback(_kind), do: nil
+
+  defp tracker_project_number_env_fallback("github"), do: System.get_env("GITHUB_PROJECT_NUMBER")
+  defp tracker_project_number_env_fallback(_kind), do: nil
+
+  defp tracker_assignee_env_fallback("linear"), do: System.get_env("LINEAR_ASSIGNEE")
+  defp tracker_assignee_env_fallback("trello"), do: System.get_env("TRELLO_ASSIGNEE")
+  defp tracker_assignee_env_fallback("github"), do: System.get_env("GITHUB_ASSIGNEE")
+  defp tracker_assignee_env_fallback(_kind), do: nil
+
+  defp guardrails_operator_token_env_fallback do
+    System.get_env("SYMPHONY_OPERATOR_TOKEN") || System.get_env("SYMPHONY_GUARDRAILS_OPERATOR_TOKEN")
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -422,16 +719,30 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defp resolve_string_setting(nil, fallback), do: normalize_string_value(fallback)
+
+  defp resolve_string_setting(value, fallback) when is_binary(value) do
+    case resolve_env_value(value, fallback) do
+      resolved when is_binary(resolved) -> normalize_string_value(resolved)
+      _resolved -> nil
+    end
+  end
+
   defp resolve_path_value(value, default) when is_binary(value) do
-    case normalize_path_token(value) do
-      :missing ->
-        default
+    case env_reference_name(value) do
+      {:ok, env_name} ->
+        case System.get_env(env_name) do
+          nil -> Path.expand(default)
+          "" -> Path.expand(default)
+          env_value -> Path.expand(env_value)
+        end
 
-      "" ->
-        default
-
-      path ->
-        path
+      :error ->
+        case String.trim(value) do
+          "" -> Path.expand(default)
+          _ when value == default -> Path.expand(default)
+          _ -> value
+        end
     end
   end
 
@@ -449,13 +760,6 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp normalize_path_token(value) when is_binary(value) do
-    case env_reference_name(value) do
-      {:ok, env_name} -> resolve_env_token(env_name)
-      :error -> value
-    end
-  end
-
   defp env_reference_name("$" <> env_name) do
     if String.match?(env_name, ~r/^[A-Za-z_][A-Za-z0-9_]*$/) do
       {:ok, env_name}
@@ -466,18 +770,22 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp env_reference_name(_value), do: :error
 
-  defp resolve_env_token(env_name) do
-    case System.get_env(env_name) do
-      nil -> :missing
-      env_value -> env_value
-    end
-  end
-
   defp normalize_secret_value(value) when is_binary(value) do
     if value == "", do: nil, else: value
   end
 
   defp normalize_secret_value(_value), do: nil
+
+  @doc false
+  @spec normalize_string_value(term()) :: String.t() | nil
+  def normalize_string_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      normalized -> normalized
+    end
+  end
+
+  def normalize_string_value(_value), do: nil
 
   defp default_turn_sandbox_policy(workspace) do
     %{

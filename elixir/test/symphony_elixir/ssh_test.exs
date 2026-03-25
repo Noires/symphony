@@ -164,12 +164,12 @@ defmodule SymphonyElixir.SSHTest do
 
   defp install_fake_ssh!(test_root, trace_file, script \\ nil) do
     fake_bin_dir = Path.join(test_root, "bin")
-    fake_ssh = Path.join(fake_bin_dir, "ssh")
 
     File.mkdir_p!(fake_bin_dir)
 
-    File.write!(
-      fake_ssh,
+    SymphonyElixir.TestSupport.install_fake_executable!(
+      fake_bin_dir,
+      "ssh",
       script ||
         """
         #!/bin/sh
@@ -178,11 +178,10 @@ defmodule SymphonyElixir.SSHTest do
         """
     )
 
-    File.chmod!(fake_ssh, 0o755)
-    System.put_env("PATH", fake_bin_dir <> ":" <> (System.get_env("PATH") || ""))
+    System.put_env("PATH", prepend_to_path(fake_bin_dir))
   end
 
-  defp wait_for_trace!(trace_file, attempts \\ 20)
+  defp wait_for_trace!(trace_file, attempts \\ 80)
   defp wait_for_trace!(trace_file, 0), do: flunk("timed out waiting for fake ssh trace at #{trace_file}")
 
   defp wait_for_trace!(trace_file, attempts) do
@@ -196,4 +195,12 @@ defmodule SymphonyElixir.SSHTest do
 
   defp restore_env(key, nil), do: System.delete_env(key)
   defp restore_env(key, value), do: System.put_env(key, value)
+
+  defp prepend_to_path(entry, current_path \\ System.get_env("PATH")) do
+    separator = if match?({:win32, _}, :os.type()), do: ";", else: ":"
+
+    [entry, current_path || ""]
+    |> Enum.reject(&(&1 == ""))
+    |> Enum.join(separator)
+  end
 end

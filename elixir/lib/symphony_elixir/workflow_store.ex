@@ -6,6 +6,7 @@ defmodule SymphonyElixir.WorkflowStore do
   use GenServer
   require Logger
 
+  alias SymphonyElixir.Dotenv
   alias SymphonyElixir.Workflow
 
   @poll_interval_ms 1_000
@@ -139,11 +140,26 @@ defmodule SymphonyElixir.WorkflowStore do
   end
 
   defp current_stamp(path) when is_binary(path) do
+    with {:ok, workflow_stamp} <- file_stamp(path) do
+      case dotenv_stamp(path) do
+        {:error, reason} -> {:error, reason}
+        stamp -> {:ok, {workflow_stamp, stamp}}
+      end
+    end
+  end
+
+  defp dotenv_stamp(workflow_path) when is_binary(workflow_path) do
+    case file_stamp(Dotenv.path_for_workflow(workflow_path)) do
+      {:ok, stamp} -> stamp
+      {:error, :enoent} -> :missing
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp file_stamp(path) when is_binary(path) do
     with {:ok, stat} <- File.stat(path, time: :posix),
          {:ok, content} <- File.read(path) do
       {:ok, {stat.mtime, stat.size, :erlang.phash2(content)}}
-    else
-      {:error, reason} -> {:error, reason}
     end
   end
 

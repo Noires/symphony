@@ -1,21 +1,25 @@
 defmodule SymphonyElixir.Orchestrator do
   @moduledoc """
-  Polls Linear and dispatches repository copies to Codex-backed workers.
+  Polls the configured tracker and dispatches repository copies to Codex-backed workers.
   """
 
   use GenServer
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, AuditLog, Config, Guardrails.Approvals, Guardrails.Overrides, Guardrails.Policy, Guardrails.Rule, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
+  @guardrail_action_cooldown_ms 1_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
   @empty_codex_totals %{
     input_tokens: 0,
+    cached_input_tokens: 0,
+    uncached_input_tokens: 0,
     output_tokens: 0,
     total_tokens: 0,
     seconds_running: 0
@@ -35,7 +39,13 @@ defmodule SymphonyElixir.Orchestrator do
       :tick_token,
       running: %{},
       completed: MapSet.new(),
+      completed_active_states: %{},
+      active_issue_observed_at: %{},
       claimed: MapSet.new(),
+      pending_approvals: %{},
+      guardrail_rules: %{},
+      guardrail_overrides: %{workflow: nil, runs: %{}},
+      operator_action_recent: %{},
       retry_attempts: %{},
       codex_totals: nil,
       codex_rate_limits: nil
@@ -52,6 +62,9 @@ defmodule SymphonyElixir.Orchestrator do
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
+    pending_approvals = load_pending_approvals()
+    guardrail_rules = load_guardrail_rules()
+    guardrail_overrides = load_guardrail_overrides()
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
@@ -60,6 +73,10 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      claimed: pending_approvals |> Map.keys() |> MapSet.new(),
+      pending_approvals: pending_approvals,
+      guardrail_rules: guardrail_rules,
+      guardrail_overrides: guardrail_overrides,
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -126,31 +143,76 @@ defmodule SymphonyElixir.Orchestrator do
 
       issue_id ->
         {running_entry, state} = pop_running_entry(state, issue_id)
-        state = record_session_completion_totals(state, running_entry)
+
+        state =
+          state
+          |> record_session_completion_totals(running_entry)
+          |> expire_run_scoped_guardrails(running_entry)
+
         session_id = running_entry_session_id(running_entry)
 
         state =
           case reason do
-            :normal ->
-              Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+            {:approval_pending, evaluation} ->
+              Logger.info("Agent task paused for guardrail approval for issue_id=#{issue_id} session_id=#{session_id}")
+              pause_issue_for_approval(state, issue_id, running_entry, evaluation)
 
-              state
-              |> complete_issue(issue_id)
-              |> schedule_issue_retry(issue_id, 1, %{
-                identifier: running_entry.identifier,
-                delay_type: :continuation,
-                worker_host: Map.get(running_entry, :worker_host),
-                workspace_path: Map.get(running_entry, :workspace_path)
-              })
+            {:approval_denied, evaluation} ->
+              Logger.warning("Agent task denied by guardrail policy for issue_id=#{issue_id} session_id=#{session_id}")
+              deny_issue_by_policy(state, issue_id, running_entry, evaluation)
+
+            :normal ->
+              if Config.settings!().agent.continue_on_active_issue do
+                finish_run_with_followups(running_entry, %{
+                  status: "completed",
+                  next_action: "continuation_retry",
+                  issue_state_finished: running_entry.issue.state
+                })
+
+                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+
+                state
+                |> complete_issue(running_entry.issue)
+                |> schedule_issue_retry(issue_id, 1, %{
+                  identifier: running_entry.identifier,
+                  delay_type: :continuation,
+                  worker_host: Map.get(running_entry, :worker_host),
+                  workspace_path: Map.get(running_entry, :workspace_path)
+                })
+              else
+                transition_result = maybe_transition_completed_issue(running_entry.issue)
+                log_completed_issue_transition(issue_id, session_id, transition_result)
+
+                finish_run_with_followups(running_entry, %{
+                  status: "completed",
+                  next_action: completion_next_action(transition_result),
+                  issue_state_finished: completion_issue_state(running_entry.issue.state, transition_result),
+                  tracker_transition: audit_tracker_transition(running_entry.issue.state, transition_result)
+                })
+
+                Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; active-state continuation disabled, holding issue until tracker state changes")
+
+                state
+                |> complete_issue(running_entry.issue)
+                |> release_issue_claim(issue_id)
+              end
 
             _ ->
               Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
 
               next_attempt = next_retry_attempt_from_running(running_entry)
+              error = "agent exited: #{inspect(reason)}"
+
+              finish_run_with_followups(running_entry, %{
+                status: "failed",
+                next_action: "retry",
+                last_error: error,
+                issue_state_finished: running_entry.issue.state
+              })
 
               schedule_issue_retry(state, issue_id, next_attempt, %{
                 identifier: running_entry.identifier,
-                error: "agent exited: #{inspect(reason)}",
+                error: error,
                 worker_host: Map.get(running_entry, :worker_host),
                 workspace_path: Map.get(running_entry, :workspace_path)
               })
@@ -175,6 +237,7 @@ defmodule SymphonyElixir.Orchestrator do
           |> maybe_put_runtime_value(:worker_host, runtime_info[:worker_host])
           |> maybe_put_runtime_value(:workspace_path, runtime_info[:workspace_path])
 
+        AuditLog.record_runtime_info(updated_running_entry, runtime_info)
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
     end
@@ -190,9 +253,11 @@ defmodule SymphonyElixir.Orchestrator do
 
       running_entry ->
         {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+        AuditLog.record_codex_update(updated_running_entry, update)
 
         state =
           state
+          |> maybe_consume_guardrail_rule(updated_running_entry, update)
           |> apply_codex_token_delta(token_delta)
           |> apply_codex_rate_limits(update)
 
@@ -222,12 +287,25 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_dispatch(%State{} = state) do
-    state = reconcile_running_issues(state)
+    state =
+      state
+      |> prune_guardrail_rules()
+      |> prune_guardrail_overrides()
+      |> reconcile_running_issues()
+      |> reconcile_pending_approval_issues()
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      state =
+        state
+        |> reconcile_completed_active_issue_states(issues)
+        |> reconcile_active_issue_observed_at(issues)
+
+      if available_slots(state) > 0 do
+        choose_issues(issues, state)
+      else
+        state
+      end
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -235,6 +313,38 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, :missing_linear_project_slug} ->
         Logger.error("Linear project slug missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_trello_api_key} ->
+        Logger.error("Trello API key missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_trello_api_token} ->
+        Logger.error("Trello API token missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_trello_board_id} ->
+        Logger.error("Trello board ID missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_github_api_token} ->
+        Logger.error("GitHub API token missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_github_owner} ->
+        Logger.error("GitHub owner missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_github_repo} ->
+        Logger.error("GitHub repository missing in WORKFLOW.md")
+        state
+
+      {:error, :missing_github_project_number} ->
+        Logger.error("GitHub project number missing in WORKFLOW.md")
+        state
+
+      {:error, :invalid_github_project_number} ->
+        Logger.error("GitHub project number must be a positive integer in WORKFLOW.md")
         state
 
       {:error, :missing_tracker_kind} ->
@@ -264,7 +374,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:error, reason} ->
-        Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
+        Logger.error("Failed to fetch from tracker: #{inspect(reason)}")
         state
 
       false ->
@@ -296,6 +406,338 @@ defmodule SymphonyElixir.Orchestrator do
       end
     end
   end
+
+  defp reconcile_pending_approval_issues(%State{} = state) do
+    pending_issue_ids = Map.keys(state.pending_approvals)
+
+    if pending_issue_ids == [] do
+      state
+    else
+      case Tracker.fetch_issue_states_by_ids(pending_issue_ids) do
+        {:ok, issues} ->
+          issues
+          |> reconcile_pending_approval_issue_states(
+            state,
+            active_state_set(),
+            terminal_state_set()
+          )
+          |> reconcile_missing_pending_approval_issue_ids(pending_issue_ids, issues)
+
+        {:error, reason} ->
+          Logger.debug("Failed to refresh pending approval issue states: #{inspect(reason)}; keeping pending approvals as-is")
+          state
+      end
+    end
+  end
+
+  defp reconcile_pending_approval_issue_states([], state, _active_states, _terminal_states), do: state
+
+  defp reconcile_pending_approval_issue_states([issue | rest], state, active_states, terminal_states) do
+    reconcile_pending_approval_issue_states(
+      rest,
+      reconcile_pending_approval_issue_state(issue, state, active_states, terminal_states),
+      active_states,
+      terminal_states
+    )
+  end
+
+  defp reconcile_pending_approval_issue_state(%Issue{id: issue_id} = issue, %State{} = state, active_states, terminal_states)
+       when is_binary(issue_id) do
+    case Map.get(state.pending_approvals, issue_id) do
+      nil ->
+        state
+
+      approval ->
+        cond do
+          terminal_issue_state?(issue.state, terminal_states) ->
+            Logger.info("Issue moved to terminal state while awaiting approval: #{issue_context(issue)} state=#{issue.state}; clearing pending approval")
+
+            clear_pending_approval(state, issue_id, "issue moved to terminal state: #{issue.state}", cleanup_workspace: true)
+
+          !active_issue_state?(issue.state, active_states) ->
+            Logger.info("Issue moved out of active states while awaiting approval: #{issue_context(issue)} state=#{issue.state}; clearing pending approval")
+
+            clear_pending_approval(state, issue_id, "issue moved to non-active state: #{issue.state}")
+
+          true ->
+            updated_approval = Approvals.update_issue_state(approval, issue.state)
+            %{state | pending_approvals: Map.put(state.pending_approvals, issue_id, updated_approval)}
+        end
+    end
+  end
+
+  defp reconcile_pending_approval_issue_state(_issue, state, _active_states, _terminal_states), do: state
+
+  defp reconcile_missing_pending_approval_issue_ids(%State{} = state, requested_issue_ids, issues)
+       when is_list(requested_issue_ids) and is_list(issues) do
+    visible_issue_ids =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
+        _ -> []
+      end)
+      |> MapSet.new()
+
+    Enum.reduce(requested_issue_ids, state, fn issue_id, state_acc ->
+      if MapSet.member?(visible_issue_ids, issue_id) do
+        state_acc
+      else
+        Logger.info("Issue no longer visible while awaiting approval: issue_id=#{issue_id}; clearing pending approval")
+        clear_pending_approval(state_acc, issue_id, "issue no longer visible")
+      end
+    end)
+  end
+
+  defp reconcile_missing_pending_approval_issue_ids(state, _requested_issue_ids, _issues), do: state
+
+  defp pause_issue_for_approval(%State{} = state, issue_id, running_entry, evaluation)
+       when is_binary(issue_id) and is_map(running_entry) and is_map(evaluation) do
+    approval = Approvals.new(running_entry, evaluation)
+    identifier = Map.get(running_entry, :identifier, issue_id)
+
+    AuditLog.finish_run(running_entry, %{
+      status: "blocked",
+      next_action: "awaiting_approval",
+      issue_state_finished: running_entry.issue.state
+    })
+
+    AuditLog.put_guardrail_approval(approval)
+    maybe_record_approval_audit(approval)
+
+    Logger.info("Run paused for operator approval issue_id=#{issue_id} issue_identifier=#{identifier} approval_id=#{approval.id} action_type=#{approval.action_type}")
+
+    %{
+      state
+      | pending_approvals: Map.put(state.pending_approvals, issue_id, approval),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+    }
+  end
+
+  defp deny_issue_by_policy(%State{} = state, issue_id, running_entry, evaluation)
+       when is_binary(issue_id) and is_map(running_entry) and is_map(evaluation) do
+    approval =
+      running_entry
+      |> Approvals.new(evaluation)
+      |> Map.put(:status, "denied_by_policy")
+
+    identifier = Map.get(running_entry, :identifier, issue_id)
+
+    AuditLog.finish_run(running_entry, %{
+      status: "blocked",
+      next_action: "denied_by_policy",
+      last_error: evaluation[:reason],
+      issue_state_finished: running_entry.issue.state
+    })
+
+    AuditLog.put_guardrail_approval(approval)
+    maybe_record_approval_audit(approval)
+
+    Logger.warning("Run denied by policy and held for operator review issue_id=#{issue_id} issue_identifier=#{identifier} approval_id=#{approval.id} action_type=#{approval.action_type}")
+
+    %{
+      state
+      | pending_approvals: Map.put(state.pending_approvals, issue_id, approval),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+    }
+  end
+
+  defp clear_pending_approval(%State{} = state, issue_id, reason, opts \\ [])
+       when is_binary(issue_id) and is_binary(reason) do
+    case Map.get(state.pending_approvals, issue_id) do
+      %Approvals{} = approval ->
+        if Keyword.get(opts, :record_cancellation_audit, true) do
+          maybe_record_approval_cancellation_audit(approval, reason)
+        end
+
+        updated_approval =
+          approval
+          |> Approvals.cancel(reason)
+          |> then(fn cancelled ->
+            if Keyword.get(opts, :persist_status, true), do: AuditLog.put_guardrail_approval(cancelled)
+            cancelled
+          end)
+
+        if Keyword.get(opts, :cleanup_workspace, false) do
+          cleanup_issue_workspace(updated_approval.issue_identifier, updated_approval.worker_host)
+        end
+
+        state =
+          %{state | pending_approvals: Map.delete(state.pending_approvals, issue_id)}
+
+        if Keyword.get(opts, :release_claim, true) do
+          release_issue_claim(state, issue_id)
+        else
+          state
+        end
+
+      _ ->
+        if Keyword.get(opts, :release_claim, true), do: release_issue_claim(state, issue_id), else: state
+    end
+  end
+
+  defp maybe_record_approval_audit(%Approvals{issue_identifier: issue_identifier, run_id: run_id} = approval)
+       when is_binary(issue_identifier) and is_binary(run_id) do
+    AuditLog.record_run_event(
+      issue_identifier,
+      run_id,
+      Approvals.audit_event(approval),
+      %{
+        "pending_approval" => Approvals.snapshot_entry(approval)
+      }
+    )
+  end
+
+  defp maybe_record_approval_audit(_approval), do: :ok
+
+  defp maybe_record_approval_cancellation_audit(%Approvals{issue_identifier: issue_identifier, run_id: run_id} = approval, reason)
+       when is_binary(issue_identifier) and is_binary(run_id) and is_binary(reason) do
+    AuditLog.record_run_event(issue_identifier, run_id, Approvals.cancellation_audit_event(approval, reason))
+  end
+
+  defp maybe_record_approval_cancellation_audit(_approval, _reason), do: :ok
+
+  defp prune_guardrail_rules(%State{} = state) do
+    now = DateTime.utc_now()
+
+    rules =
+      Enum.reduce(state.guardrail_rules, %{}, fn {rule_id, rule}, acc ->
+        if Rule.active?(rule, now) do
+          Map.put(acc, rule_id, rule)
+        else
+          disabled_rule =
+            if rule.enabled == true do
+              Rule.disable(rule, reason: "expired")
+            else
+              rule
+            end
+
+          AuditLog.put_guardrail_rule(disabled_rule)
+          acc
+        end
+      end)
+
+    %{state | guardrail_rules: rules}
+  end
+
+  defp prune_guardrail_overrides(%State{} = state) do
+    now = DateTime.utc_now()
+    pruned = Overrides.prune(state.guardrail_overrides, now)
+
+    if state.guardrail_overrides.workflow != pruned.workflow do
+      persist_guardrail_override_if_present(state.guardrail_overrides.workflow, reason: "expired")
+    end
+
+    Enum.each(state.guardrail_overrides.runs, fn {run_id, override} ->
+      unless Map.has_key?(pruned.runs, run_id) do
+        persist_guardrail_override_if_present(override, reason: "expired")
+      end
+    end)
+
+    %{state | guardrail_overrides: pruned}
+  end
+
+  defp load_pending_approvals do
+    case AuditLog.list_guardrail_approvals(statuses: ["pending_review", "denied_by_policy"]) do
+      {:ok, approvals} ->
+        Enum.reduce(approvals, %{}, fn snapshot, acc ->
+          case Approvals.from_snapshot(snapshot) do
+            %Approvals{issue_id: issue_id} = approval when is_binary(issue_id) ->
+              Map.put(acc, issue_id, approval)
+
+            _ ->
+              acc
+          end
+        end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp load_guardrail_rules do
+    case AuditLog.list_guardrail_rules(active_only: true) do
+      {:ok, rules} ->
+        Enum.reduce(rules, %{}, fn snapshot, acc ->
+          case Rule.from_snapshot(snapshot) do
+            %Rule{id: rule_id} = rule when is_binary(rule_id) ->
+              Map.put(acc, rule_id, rule)
+
+            _ ->
+              acc
+          end
+        end)
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp load_guardrail_overrides do
+    case AuditLog.list_guardrail_overrides(active_only: true) do
+      {:ok, overrides} ->
+        Enum.reduce(overrides, Overrides.empty_state(), fn snapshot, acc ->
+          case Overrides.from_snapshot(snapshot) do
+            %Overrides{scope: "workflow"} = override ->
+              %{acc | workflow: override}
+
+            %Overrides{scope: "run", scope_key: run_id} = override when is_binary(run_id) ->
+              %{acc | runs: Map.put(acc.runs, run_id, override)}
+
+            _ ->
+              acc
+          end
+        end)
+
+      _ ->
+        Overrides.empty_state()
+    end
+  end
+
+  defp effective_guardrail_rules(%State{} = state, run_id) do
+    state.guardrail_rules
+    |> Map.values()
+    |> Enum.filter(&Rule.applies_to_run?(&1, run_id))
+    |> Enum.filter(&Rule.active?/1)
+  end
+
+  defp maybe_consume_guardrail_rule(%State{} = state, running_entry, %{event: event, source: "policy_rule", rule_id: rule_id})
+       when event in [:approval_auto_approved, "approval_auto_approved"] and is_binary(rule_id) do
+    case Map.get(state.guardrail_rules, rule_id) do
+      %Rule{} = rule ->
+        updated_rule = Rule.consume(rule)
+
+        if updated_rule == rule do
+          state
+        else
+          AuditLog.put_guardrail_rule(updated_rule)
+          maybe_record_guardrail_rule_consumed_audit(running_entry, rule, updated_rule)
+
+          rules =
+            if Rule.active?(updated_rule) do
+              Map.put(state.guardrail_rules, rule_id, updated_rule)
+            else
+              Map.delete(state.guardrail_rules, rule_id)
+            end
+
+          %{state | guardrail_rules: rules}
+        end
+
+      _ ->
+        state
+    end
+  end
+
+  defp maybe_consume_guardrail_rule(%State{} = state, _running_entry, _update), do: state
+
+  defp persist_guardrail_override_if_present(override, opts)
+
+  defp persist_guardrail_override_if_present(%Overrides{} = override, opts) do
+    override
+    |> Overrides.disable(reason: Keyword.get(opts, :reason))
+    |> AuditLog.put_guardrail_override()
+  end
+
+  defp persist_guardrail_override_if_present(_override, _opts), do: :ok
 
   @doc false
   @spec reconcile_issue_states_for_test([Issue.t()], term()) :: term()
@@ -349,12 +791,22 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_running_issue(state, issue.id, true, %{
+          status: "interrupted",
+          next_action: "workspace_cleanup",
+          last_error: "issue moved to terminal state: #{issue.state}",
+          issue_state_finished: issue.state
+        })
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, %{
+          status: "interrupted",
+          next_action: "stopped",
+          last_error: "issue no longer routed to this worker",
+          issue_state_finished: issue.state
+        })
 
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
@@ -362,7 +814,12 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, %{
+          status: "interrupted",
+          next_action: "stopped",
+          last_error: "issue moved to non-active state: #{issue.state}",
+          issue_state_finished: issue.state
+        })
     end
   end
 
@@ -383,7 +840,12 @@ defmodule SymphonyElixir.Orchestrator do
         state_acc
       else
         log_missing_running_issue(state_acc, issue_id)
-        terminate_running_issue(state_acc, issue_id, false)
+
+        terminate_running_issue(state_acc, issue_id, false, %{
+          status: "interrupted",
+          next_action: "stopped",
+          last_error: "issue no longer visible during running-state refresh"
+        })
       end
     end)
   end
@@ -412,7 +874,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, audit_attrs) do
     case Map.get(state.running, issue_id) do
       nil ->
         release_issue_claim(state, issue_id)
@@ -420,6 +882,10 @@ defmodule SymphonyElixir.Orchestrator do
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
         worker_host = Map.get(running_entry, :worker_host)
+
+        if is_map(audit_attrs) do
+          finish_run_with_followups(running_entry, audit_attrs)
+        end
 
         if cleanup_workspace do
           cleanup_issue_workspace(identifier, worker_host)
@@ -476,7 +942,12 @@ defmodule SymphonyElixir.Orchestrator do
       next_attempt = next_retry_attempt_from_running(running_entry)
 
       state
-      |> terminate_running_issue(issue_id, false)
+      |> terminate_running_issue(issue_id, false, %{
+        status: "failed",
+        next_action: "retry",
+        last_error: "stalled for #{elapsed_ms}ms without codex activity",
+        issue_state_finished: running_entry.issue.state
+      })
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
         error: "stalled for #{elapsed_ms}ms without codex activity"
@@ -553,11 +1024,12 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed} = state,
+         %State{running: running, claimed: claimed, completed_active_states: completed_active_states} = state,
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
+      !completed_in_current_active_state?(issue, completed_active_states) and
       !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
@@ -657,10 +1129,10 @@ defmodule SymphonyElixir.Orchestrator do
     |> MapSet.new()
   end
 
-  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
+  defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil, dispatch_metadata \\ %{}) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host, dispatch_metadata)
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -677,7 +1149,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host) do
+  defp do_dispatch_issue(%State{} = state, issue, attempt, preferred_worker_host, dispatch_metadata) do
     recipient = self()
 
     case select_worker_host(state, preferred_worker_host) do
@@ -686,42 +1158,88 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       worker_host ->
-        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host)
+        spawn_issue_on_worker_host(state, issue, attempt, recipient, worker_host, dispatch_metadata)
     end
   end
 
-  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+  defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host, dispatch_metadata) do
+    run_id = Map.get(dispatch_metadata, :run_id) || generate_run_id()
+    started_at = DateTime.utc_now()
+    timing = build_run_timing(state, issue, attempt, started_at, normalize_dispatch_metadata(dispatch_metadata))
+    guardrail_rules = effective_guardrail_rules(state, run_id)
+    guardrails_override = Overrides.effective_override(state.guardrail_overrides, run_id, started_at)
+
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(
+             issue,
+             recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             run_id: run_id,
+             guardrail_rules: guardrail_rules,
+             guardrails_override: guardrails_override,
+             full_access_override: guardrails_override
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
-        running =
-          Map.put(state.running, issue.id, %{
-            pid: pid,
-            ref: ref,
-            identifier: issue.identifier,
-            issue: issue,
+        running_entry = %{
+          pid: pid,
+          ref: ref,
+          run_id: run_id,
+          identifier: issue.identifier,
+          issue: issue,
+          worker_host: worker_host,
+          workspace_path: nil,
+          session_id: nil,
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          codex_app_server_pid: nil,
+          codex_input_tokens: 0,
+          codex_cached_input_tokens: 0,
+          codex_uncached_input_tokens: 0,
+          codex_output_tokens: 0,
+          codex_total_tokens: 0,
+          codex_last_reported_input_tokens: 0,
+          codex_last_reported_cached_input_tokens: 0,
+          codex_last_reported_output_tokens: 0,
+          codex_last_reported_total_tokens: 0,
+          turn_count: 0,
+          guardrail_rule_ids: Enum.map(guardrail_rules, & &1.id),
+          guardrails_override: guardrails_override,
+          retry_attempt: normalize_retry_attempt(attempt),
+          started_at: started_at
+        }
+
+        if Map.has_key?(dispatch_metadata, :run_id) do
+          AuditLog.resume_run(
+            issue,
+            run_id,
+            approval_id: Map.get(dispatch_metadata, :resume_approval_id),
+            decision: Map.get(dispatch_metadata, :decision),
+            decision_scope: Map.get(dispatch_metadata, :decision_scope),
             worker_host: worker_host,
-            workspace_path: nil,
-            session_id: nil,
-            last_codex_message: nil,
-            last_codex_timestamp: nil,
-            last_codex_event: nil,
-            codex_app_server_pid: nil,
-            codex_input_tokens: 0,
-            codex_output_tokens: 0,
-            codex_total_tokens: 0,
-            codex_last_reported_input_tokens: 0,
-            codex_last_reported_output_tokens: 0,
-            codex_last_reported_total_tokens: 0,
-            turn_count: 0,
+            workspace_path: Map.get(dispatch_metadata, :workspace_path),
+            resumed_at: started_at
+          )
+        else
+          AuditLog.start_run(issue,
+            run_id: run_id,
             retry_attempt: normalize_retry_attempt(attempt),
-            started_at: DateTime.utc_now()
-          })
+            worker_host: worker_host,
+            started_at: started_at,
+            timing: timing
+          )
+        end
+
+        maybe_record_human_response_audit(issue.identifier, run_id, timing)
+
+        running =
+          Map.put(state.running, issue.id, running_entry)
 
         %{
           state
@@ -762,7 +1280,16 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp revalidate_issue_for_dispatch(issue, _issue_fetcher, _terminal_states), do: {:ok, issue}
 
-  defp complete_issue(%State{} = state, issue_id) do
+  defp complete_issue(%State{} = state, %Issue{id: issue_id} = issue) when is_binary(issue_id) do
+    %{
+      state
+      | completed: MapSet.put(state.completed, issue_id),
+        completed_active_states: maybe_record_completed_active_state(state.completed_active_states, issue),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+    }
+  end
+
+  defp complete_issue(%State{} = state, issue_id) when is_binary(issue_id) do
     %{
       state
       | completed: MapSet.put(state.completed, issue_id),
@@ -775,6 +1302,7 @@ defmodule SymphonyElixir.Orchestrator do
     previous_retry = Map.get(state.retry_attempts, issue_id, %{attempt: 0})
     next_attempt = if is_integer(attempt), do: attempt, else: previous_retry.attempt + 1
     delay_ms = retry_delay(next_attempt, metadata)
+    scheduled_at = DateTime.utc_now()
     old_timer = Map.get(previous_retry, :timer_ref)
     retry_token = make_ref()
     due_at_ms = System.monotonic_time(:millisecond) + delay_ms
@@ -801,6 +1329,7 @@ defmodule SymphonyElixir.Orchestrator do
             timer_ref: timer_ref,
             retry_token: retry_token,
             due_at_ms: due_at_ms,
+            scheduled_at: scheduled_at,
             identifier: identifier,
             error: error,
             worker_host: worker_host,
@@ -816,7 +1345,8 @@ defmodule SymphonyElixir.Orchestrator do
           identifier: Map.get(retry_entry, :identifier),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
-          workspace_path: Map.get(retry_entry, :workspace_path)
+          workspace_path: Map.get(retry_entry, :workspace_path),
+          scheduled_at: Map.get(retry_entry, :scheduled_at)
         }
 
         {:ok, attempt, metadata, %{state | retry_attempts: Map.delete(state.retry_attempts, issue_id)}}
@@ -904,7 +1434,7 @@ defmodule SymphonyElixir.Orchestrator do
     if retry_candidate_issue?(issue, terminal_state_set()) and
          dispatch_slots_available?(issue, state) and
          worker_slots_available?(state, metadata[:worker_host]) do
-      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host])}
+      {:noreply, dispatch_issue(state, issue, attempt, metadata[:worker_host], metadata)}
     else
       Logger.debug("No available slots for retrying #{issue_context(issue)}; retrying again")
 
@@ -923,6 +1453,166 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp release_issue_claim(%State{} = state, issue_id) do
     %{state | claimed: MapSet.delete(state.claimed, issue_id)}
+  end
+
+  defp reconcile_completed_active_issue_states(%State{} = state, issues) when is_list(issues) do
+    active_issue_ids =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
+        _ -> []
+      end)
+      |> MapSet.new()
+
+    completed_active_states =
+      Enum.reduce(state.completed_active_states, %{}, fn {issue_id, state_name}, acc ->
+        if MapSet.member?(active_issue_ids, issue_id) do
+          Map.put(acc, issue_id, state_name)
+        else
+          acc
+        end
+      end)
+
+    %{state | completed_active_states: completed_active_states}
+  end
+
+  defp reconcile_completed_active_issue_states(state, _issues), do: state
+
+  defp reconcile_active_issue_observed_at(%State{} = state, issues) when is_list(issues) do
+    now = DateTime.utc_now()
+
+    observed =
+      Enum.reduce(issues, %{}, fn
+        %Issue{id: issue_id, state: state_name}, acc when is_binary(issue_id) and is_binary(state_name) ->
+          normalized_state = normalize_issue_state(state_name)
+
+          observed_at =
+            case Map.get(state.active_issue_observed_at, issue_id) do
+              %{state: ^normalized_state, observed_at: %DateTime{} = existing} -> existing
+              _ -> now
+            end
+
+          Map.put(acc, issue_id, %{state: normalized_state, observed_at: observed_at})
+
+        _issue, acc ->
+          acc
+      end)
+
+    %{state | active_issue_observed_at: observed}
+  end
+
+  defp reconcile_active_issue_observed_at(state, _issues), do: state
+
+  defp completed_in_current_active_state?(%Issue{id: issue_id, state: state_name}, completed_active_states)
+       when is_binary(issue_id) and is_binary(state_name) and is_map(completed_active_states) do
+    Map.get(completed_active_states, issue_id) == normalize_issue_state(state_name)
+  end
+
+  defp completed_in_current_active_state?(_issue, _completed_active_states), do: false
+
+  defp maybe_record_completed_active_state(completed_active_states, %Issue{id: issue_id, state: state_name})
+       when is_binary(issue_id) and is_binary(state_name) and is_map(completed_active_states) do
+    Map.put(completed_active_states, issue_id, normalize_issue_state(state_name))
+  end
+
+  defp maybe_record_completed_active_state(completed_active_states, _issue)
+       when is_map(completed_active_states),
+       do: completed_active_states
+
+  defp maybe_transition_completed_issue(%Issue{id: issue_id, state: current_state})
+       when is_binary(issue_id) and is_binary(current_state) do
+    case completed_issue_state_for_issue(current_state) do
+      target_state when is_binary(target_state) ->
+        normalized_target_state = Schema.normalize_issue_state(target_state)
+
+        if Schema.normalize_issue_state(current_state) == normalized_target_state do
+          :noop
+        else
+          case Tracker.update_issue_state(issue_id, target_state) do
+            :ok -> {:ok, target_state}
+            {:error, reason} -> {:error, target_state, reason}
+          end
+        end
+
+      _ ->
+        :noop
+    end
+  end
+
+  defp maybe_transition_completed_issue(_issue), do: :noop
+
+  defp completed_issue_state_for_issue(current_state) when is_binary(current_state) do
+    agent = Config.settings!().agent
+
+    Map.get(
+      agent.completed_issue_state_by_state,
+      Schema.normalize_issue_state(current_state),
+      agent.completed_issue_state
+    )
+  end
+
+  defp completed_issue_state_for_issue(_current_state), do: nil
+
+  defp log_completed_issue_transition(issue_id, session_id, {:ok, target_state}) do
+    Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; moved issue to state=#{target_state}")
+  end
+
+  defp log_completed_issue_transition(issue_id, session_id, {:error, target_state, reason}) do
+    Logger.warning("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; failed to move issue to state=#{target_state}: #{inspect(reason)}")
+  end
+
+  defp log_completed_issue_transition(_issue_id, _session_id, :noop), do: :ok
+
+  defp finish_run_with_followups(running_entry, attrs) when is_map(running_entry) and is_map(attrs) do
+    AuditLog.finish_run(running_entry, attrs)
+    maybe_publish_trello_run_summary(running_entry, attrs)
+  end
+
+  defp finish_run_with_followups(_running_entry, _attrs), do: :ok
+
+  defp maybe_publish_trello_run_summary(_running_entry, %{next_action: "continuation_retry"}), do: :ok
+
+  defp maybe_publish_trello_run_summary(%{issue: %Issue{id: issue_id, identifier: identifier}, run_id: run_id}, _attrs)
+       when is_binary(issue_id) and is_binary(identifier) and is_binary(run_id) do
+    if trello_run_summary_enabled?() do
+      case AuditLog.get_run(identifier, run_id) do
+        {:ok, run} ->
+          now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+
+          case Tracker.create_comment(issue_id, AuditLog.render_trello_run_summary(run)) do
+            :ok ->
+              AuditLog.update_run_summary(identifier, run_id, %{
+                "trello_summary" => %{
+                  "status" => "posted",
+                  "posted_at" => now
+                }
+              })
+
+            {:error, reason} ->
+              Logger.warning("Failed to publish Trello run summary for issue_id=#{issue_id} issue_identifier=#{identifier}: #{inspect(reason)}")
+
+              AuditLog.update_run_summary(identifier, run_id, %{
+                "trello_summary" => %{
+                  "status" => "failed",
+                  "error" => inspect(reason),
+                  "attempted_at" => now
+                }
+              })
+          end
+
+        _ ->
+          :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp maybe_publish_trello_run_summary(_running_entry, _attrs), do: :ok
+
+  defp trello_run_summary_enabled? do
+    settings = Config.settings!()
+    settings.tracker.kind == "trello" and settings.observability.trello_run_summary_enabled
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
@@ -1054,9 +1744,208 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp running_entry_session_id(_running_entry), do: "n/a"
 
+  defp generate_run_id do
+    Ecto.UUID.generate()
+  end
+
+  defp completion_next_action({:ok, _target_state}), do: "tracker_state_updated"
+  defp completion_next_action({:error, _target_state, _reason}), do: "tracker_state_update_failed"
+
+  defp completion_next_action(:noop) do
+    "released"
+  end
+
+  defp completion_next_action(_other), do: "released"
+
+  defp completion_issue_state(_current_state, {:ok, target_state}) when is_binary(target_state), do: target_state
+  defp completion_issue_state(current_state, _transition_result), do: current_state
+
+  defp audit_tracker_transition(current_state, {:ok, target_state}) do
+    %{"status" => "ok", "from" => current_state, "to" => target_state, "error" => nil}
+  end
+
+  defp audit_tracker_transition(current_state, {:error, target_state, reason}) do
+    %{"status" => "error", "from" => current_state, "to" => target_state, "error" => inspect(reason)}
+  end
+
+  defp audit_tracker_transition(current_state, :noop) do
+    case completed_issue_state_for_issue(current_state) do
+      target_state when is_binary(target_state) ->
+        %{"status" => "noop", "from" => current_state, "to" => target_state, "error" => nil}
+
+      _ ->
+        nil
+    end
+  end
+
+  defp audit_tracker_transition(_current_state, _result), do: nil
+
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
   end
+
+  defp build_run_timing(%State{} = state, %Issue{id: issue_id, identifier: identifier, state: state_name}, attempt, started_at, dispatch_metadata)
+       when is_binary(issue_id) and is_binary(identifier) and is_binary(state_name) and is_map(dispatch_metadata) do
+    queue_started_at =
+      cond do
+        is_integer(attempt) and attempt > 0 and match?(%DateTime{}, Map.get(dispatch_metadata, :scheduled_at)) ->
+          Map.get(dispatch_metadata, :scheduled_at)
+
+        true ->
+          case Map.get(state.active_issue_observed_at, issue_id) do
+            %{state: observed_state, observed_at: %DateTime{} = observed_at} ->
+              if observed_state == normalize_issue_state(state_name), do: observed_at, else: nil
+
+            _ ->
+              nil
+          end
+      end
+
+    queue_source =
+      cond do
+        is_integer(attempt) and attempt > 0 and match?(%DateTime{}, Map.get(dispatch_metadata, :scheduled_at)) ->
+          "retry_scheduled"
+
+        match?(%DateTime{}, queue_started_at) ->
+          "active_state_observed"
+
+        true ->
+          nil
+      end
+
+    %{}
+    |> maybe_put_timing_value("queue_started_at", queue_started_at)
+    |> maybe_put_timing_value("queue_wait_ms", duration_ms(queue_started_at, started_at))
+    |> maybe_put_timing_string("queue_source", queue_source)
+    |> Map.merge(blocked_for_human_timing(issue_id, identifier, state_name, started_at))
+    |> case do
+      timing when map_size(timing) == 0 -> nil
+      timing -> timing
+    end
+  end
+
+  defp build_run_timing(_state, _issue, _attempt, _started_at, _dispatch_metadata), do: nil
+
+  defp blocked_for_human_timing(issue_id, issue_identifier, current_state, started_at)
+       when is_binary(issue_id) and is_binary(issue_identifier) and is_binary(current_state) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    with {:ok, %{"run_id" => previous_run_id, "ended_at" => ended_at, "issue_state_finished" => previous_state}} <- AuditLog.latest_run(issue_identifier),
+         %DateTime{} = previous_ended_at <- parse_iso8601_datetime(ended_at),
+         true <- is_binary(previous_state),
+         previous_normalized = normalize_issue_state(previous_state),
+         current_normalized = normalize_issue_state(current_state),
+         false <- MapSet.member?(active_states, previous_normalized),
+         false <- MapSet.member?(terminal_states, previous_normalized),
+         true <- MapSet.member?(active_states, current_normalized),
+         {:ok, %{} = marker} <-
+           Tracker.fetch_human_response_marker(issue_id,
+             since: previous_ended_at,
+             issue_identifier: issue_identifier,
+             previous_state: previous_state,
+             current_state: current_state,
+             active_states: Config.settings!().tracker.active_states
+           ),
+         %DateTime{} = human_response_at <- parse_iso8601_datetime(Map.get(marker, "at")),
+         true <- DateTime.compare(human_response_at, started_at) in [:lt, :eq] do
+      %{
+        "blocked_for_human_ms" => duration_ms(previous_ended_at, human_response_at),
+        "blocked_started_at" => DateTime.to_iso8601(DateTime.truncate(previous_ended_at, :second)),
+        "blocked_resumed_at" => DateTime.to_iso8601(DateTime.truncate(started_at, :second)),
+        "blocked_from_run_id" => previous_run_id,
+        "human_response_at" => DateTime.to_iso8601(DateTime.truncate(human_response_at, :second)),
+        "human_response_marker" => marker,
+        "queue_wait_after_human_ms" => duration_ms(human_response_at, started_at)
+      }
+    else
+      {:error, reason} ->
+        Logger.debug("Failed to fetch human response marker for #{issue_identifier}: #{inspect(reason)}")
+        %{}
+
+      _ ->
+        %{}
+    end
+  end
+
+  defp blocked_for_human_timing(_issue_id, _issue_identifier, _current_state, _started_at), do: %{}
+
+  defp maybe_record_human_response_audit(issue_identifier, run_id, %{} = timing)
+       when is_binary(issue_identifier) and is_binary(run_id) do
+    maybe_record_human_response_marker_event(issue_identifier, run_id, timing)
+    maybe_record_handoff_annotation(issue_identifier, run_id, timing)
+    :ok
+  end
+
+  defp maybe_record_human_response_audit(_issue_identifier, _run_id, _timing), do: :ok
+
+  defp maybe_record_human_response_marker_event(issue_identifier, run_id, timing) do
+    case Map.get(timing, "human_response_marker") do
+      %{} = marker ->
+        AuditLog.record_run_event(issue_identifier, run_id, %{
+          kind: "tracker",
+          event: "human_response_detected",
+          summary: Map.get(marker, "summary") || "human response detected",
+          details: marker
+        })
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp maybe_record_handoff_annotation(issue_identifier, run_id, timing) do
+    previous_run_id = Map.get(timing, "blocked_from_run_id")
+    human_response_at = Map.get(timing, "human_response_at")
+
+    if is_binary(previous_run_id) and is_binary(human_response_at) do
+      AuditLog.update_run_summary(issue_identifier, previous_run_id, %{
+        "handoff" => %{
+          "status" => "responded",
+          "responded_at" => human_response_at,
+          "response_marker" => Map.get(timing, "human_response_marker"),
+          "followup_run_id" => run_id,
+          "queue_wait_after_human_ms" => Map.get(timing, "queue_wait_after_human_ms")
+        }
+      })
+    else
+      :ok
+    end
+  end
+
+  defp maybe_put_timing_value(timing, _key, nil), do: timing
+
+  defp maybe_put_timing_value(timing, key, %DateTime{} = value) when is_map(timing) do
+    Map.put(timing, key, DateTime.to_iso8601(DateTime.truncate(value, :second)))
+  end
+
+  defp maybe_put_timing_value(timing, key, value) when is_map(timing) do
+    Map.put(timing, key, value)
+  end
+
+  defp maybe_put_timing_string(timing, _key, nil), do: timing
+
+  defp maybe_put_timing_string(timing, key, value) when is_binary(value) and is_map(timing) do
+    Map.put(timing, key, value)
+  end
+
+  defp normalize_dispatch_metadata(metadata) when is_map(metadata), do: metadata
+  defp normalize_dispatch_metadata(_metadata), do: %{}
+
+  defp parse_iso8601_datetime(value) when is_binary(value) do
+    case DateTime.from_iso8601(value) do
+      {:ok, datetime, _offset} -> datetime
+      _ -> nil
+    end
+  end
+
+  defp parse_iso8601_datetime(_value), do: nil
+
+  defp duration_ms(%DateTime{} = started_at, %DateTime{} = ended_at) do
+    max(DateTime.diff(ended_at, started_at, :millisecond), 0)
+  end
+
+  defp duration_ms(_, _), do: nil
 
   defp available_slots(%State{} = state) do
     max(
@@ -1065,6 +1954,813 @@ defmodule SymphonyElixir.Orchestrator do
       0
     )
   end
+
+  defp handle_guardrail_approval_decision(%State{} = state, approval_id, decision, opts)
+       when decision in ["allow_once", "allow_for_session", "allow_via_rule", "deny"] do
+    if Config.settings!().guardrails.enabled != true do
+      {:error, :guardrails_disabled, state}
+    else
+      case find_pending_approval(state, approval_id) do
+        {:ok, issue_id, %Approvals{} = approval} ->
+          actor = normalize_operator_value(Keyword.get(opts, :actor))
+          reason = normalize_operator_value(Keyword.get(opts, :reason))
+          scope = normalize_operator_value(Keyword.get(opts, :scope))
+
+          with {:ok, state} <- register_operator_action(state, {:approval, approval_id}, decision) do
+            resolved_approval =
+              Approvals.resolve(
+                approval,
+                decision,
+                resolved_by: actor,
+                reason: reason,
+                decision_scope: scope
+              )
+
+            AuditLog.put_guardrail_approval(resolved_approval)
+            maybe_record_approval_decision_audit(resolved_approval)
+
+            case decision do
+              "deny" ->
+                state =
+                  state
+                  |> clear_pending_approval(issue_id, "operator denied guardrail action",
+                    persist_status: false,
+                    record_cancellation_audit: false,
+                    release_claim: false
+                  )
+                  |> complete_denied_approval_issue(approval)
+                  |> release_issue_claim(issue_id)
+
+                {:ok, %{approval: Approvals.snapshot_entry(resolved_approval)}, state}
+
+              _ ->
+                with {:ok, %Issue{} = issue} <- fetch_issue_for_resume(approval),
+                     {:ok, state, response} <- apply_approval_resume_decision(state, issue_id, issue, resolved_approval, decision, opts) do
+                  {:ok, response, state}
+                else
+                  {:error, reason} ->
+                    stale_approval =
+                      resolved_approval
+                      |> Approvals.cancel("approval decision stale: #{inspect(reason)}")
+                      |> Map.put(:resolution_reason, reason_to_string(reason))
+
+                    AuditLog.put_guardrail_approval(stale_approval)
+
+                    state =
+                      clear_pending_approval(state, issue_id, reason_to_string(reason),
+                        persist_status: false,
+                        record_cancellation_audit: false
+                      )
+
+                    {:error, reason, state}
+                end
+            end
+          else
+            {:error, reason, state} ->
+              {:error, reason, state}
+          end
+
+        :error ->
+          handle_missing_guardrail_approval_decision(state, approval_id, decision)
+      end
+    end
+  end
+
+  defp disable_guardrail_rule_in_state(%State{} = state, rule_id, opts) do
+    if Config.settings!().guardrails.enabled != true do
+      {:error, :guardrails_disabled, state}
+    else
+      case find_guardrail_rule(state, rule_id) do
+        {:ok, %Rule{} = rule} ->
+          if guardrail_rule_inactive?(rule) do
+            {:ok, %{rule: Rule.snapshot_entry(rule), idempotent: true}, state}
+          else
+            with {:ok, state} <- register_operator_action(state, {:rule, rule_id}, "disable") do
+              updated_rule =
+                Rule.disable(rule,
+                  reason: normalize_operator_value(Keyword.get(opts, :reason)) || "operator disabled rule"
+                )
+
+              AuditLog.put_guardrail_rule(updated_rule)
+              maybe_record_guardrail_rule_lifecycle_audit(updated_rule, "guardrail_rule_disabled", opts)
+
+              {:ok, %{rule: Rule.snapshot_entry(updated_rule)}, put_guardrail_rule(state, updated_rule)}
+            end
+          end
+
+        :error ->
+          {:error, :rule_not_found, state}
+      end
+    end
+  end
+
+  defp enable_guardrail_rule_in_state(%State{} = state, rule_id, opts) do
+    if Config.settings!().guardrails.enabled != true do
+      {:error, :guardrails_disabled, state}
+    else
+      case find_guardrail_rule(state, rule_id) do
+        {:ok, %Rule{} = rule} ->
+          if Rule.active?(rule) do
+            {:ok, %{rule: Rule.snapshot_entry(rule), idempotent: true}, state}
+          else
+            with {:ok, state} <- register_operator_action(state, {:rule, rule_id}, "enable") do
+              updated_rule =
+                Rule.enable(rule,
+                  reason: normalize_operator_value(Keyword.get(opts, :reason)) || "operator enabled rule"
+                )
+
+              AuditLog.put_guardrail_rule(updated_rule)
+              maybe_record_guardrail_rule_lifecycle_audit(updated_rule, "guardrail_rule_enabled", opts)
+
+              {:ok, %{rule: Rule.snapshot_entry(updated_rule)}, put_guardrail_rule(state, updated_rule)}
+            end
+          end
+
+        :error ->
+          {:error, :rule_not_found, state}
+      end
+    end
+  end
+
+  defp expire_guardrail_rule_in_state(%State{} = state, rule_id, opts) do
+    if Config.settings!().guardrails.enabled != true do
+      {:error, :guardrails_disabled, state}
+    else
+      case find_guardrail_rule(state, rule_id) do
+        {:ok, %Rule{} = rule} ->
+          if guardrail_rule_inactive?(rule) do
+            {:ok, %{rule: Rule.snapshot_entry(rule), idempotent: true}, state}
+          else
+            with {:ok, state} <- register_operator_action(state, {:rule, rule_id}, "expire") do
+              updated_rule =
+                Rule.expire(rule,
+                  reason: normalize_operator_value(Keyword.get(opts, :reason)) || "operator expired rule"
+                )
+
+              AuditLog.put_guardrail_rule(updated_rule)
+              maybe_record_guardrail_rule_lifecycle_audit(updated_rule, "guardrail_rule_expired", opts)
+
+              {:ok, %{rule: Rule.snapshot_entry(updated_rule)}, put_guardrail_rule(state, updated_rule)}
+            end
+          end
+
+        :error ->
+          {:error, :rule_not_found, state}
+      end
+    end
+  end
+
+  defp enable_run_full_access_override(%State{} = state, run_id, opts) do
+    if Config.settings!().guardrails.enabled != true do
+      {:error, :guardrails_disabled, state}
+    else
+      case Map.get(state.guardrail_overrides.runs, run_id) do
+        %Overrides{} = override ->
+          if Overrides.active?(override) do
+            {:ok, %{override: Overrides.snapshot_entry(override), idempotent: true}, state}
+          else
+            with {:ok, state} <- register_operator_action(state, {:run_override, run_id}, "enable") do
+              override =
+                Overrides.full_access_override(:run, run_id,
+                  ttl_ms: Config.settings!().guardrails.full_access_run_ttl_ms,
+                  reason: normalize_operator_value(Keyword.get(opts, :reason)),
+                  actor: normalize_operator_value(Keyword.get(opts, :actor))
+                )
+
+              AuditLog.put_guardrail_override(override)
+              maybe_record_guardrail_override_lifecycle_audit(override, "guardrail_full_access_enabled", opts)
+
+              state = %{state | guardrail_overrides: %{state.guardrail_overrides | runs: Map.put(state.guardrail_overrides.runs, run_id, override)}}
+
+              case find_pending_approval_by_run_id(state, run_id) do
+                {:ok, issue_id, approval} ->
+                  resolved_approval =
+                    Approvals.resolve(
+                      approval,
+                      "allow_for_session",
+                      resolved_by: normalize_operator_value(Keyword.get(opts, :actor)),
+                      reason: normalize_operator_value(Keyword.get(opts, :reason)) || "operator enabled full access for run",
+                      decision_scope: "run"
+                    )
+
+                  AuditLog.put_guardrail_approval(resolved_approval)
+                  maybe_record_approval_decision_audit(resolved_approval)
+
+                  case fetch_issue_for_resume(approval) do
+                    {:ok, %Issue{} = issue} ->
+                      state =
+                        state
+                        |> clear_pending_approval(issue_id, "approval resolved by run full access",
+                          persist_status: false,
+                          record_cancellation_audit: false,
+                          release_claim: false
+                        )
+                        |> resume_issue_after_guardrail_decision(
+                          issue_id,
+                          issue,
+                          approval,
+                          "allow_for_session",
+                          "run"
+                        )
+
+                      {:ok, %{approval: Approvals.snapshot_entry(resolved_approval), override: Overrides.snapshot_entry(override)}, state}
+
+                    {:error, _reason} ->
+                      state =
+                        clear_pending_approval(state, issue_id, "full access approval became stale",
+                          persist_status: false,
+                          record_cancellation_audit: false
+                        )
+
+                      {:ok, %{override: Overrides.snapshot_entry(override), approval_issue_id: issue_id}, state}
+                  end
+
+                :error ->
+                  {:ok, %{override: Overrides.snapshot_entry(override)}, state}
+              end
+            end
+          end
+
+        _ ->
+          with {:ok, state} <- register_operator_action(state, {:run_override, run_id}, "enable") do
+            override =
+              Overrides.full_access_override(:run, run_id,
+                ttl_ms: Config.settings!().guardrails.full_access_run_ttl_ms,
+                reason: normalize_operator_value(Keyword.get(opts, :reason)),
+                actor: normalize_operator_value(Keyword.get(opts, :actor))
+              )
+
+            AuditLog.put_guardrail_override(override)
+            maybe_record_guardrail_override_lifecycle_audit(override, "guardrail_full_access_enabled", opts)
+
+            state = %{state | guardrail_overrides: %{state.guardrail_overrides | runs: Map.put(state.guardrail_overrides.runs, run_id, override)}}
+
+            case find_pending_approval_by_run_id(state, run_id) do
+              {:ok, issue_id, approval} ->
+                resolved_approval =
+                  Approvals.resolve(
+                    approval,
+                    "allow_for_session",
+                    resolved_by: normalize_operator_value(Keyword.get(opts, :actor)),
+                    reason: normalize_operator_value(Keyword.get(opts, :reason)) || "operator enabled full access for run",
+                    decision_scope: "run"
+                  )
+
+                AuditLog.put_guardrail_approval(resolved_approval)
+                maybe_record_approval_decision_audit(resolved_approval)
+
+                case fetch_issue_for_resume(approval) do
+                  {:ok, %Issue{} = issue} ->
+                    state =
+                      state
+                      |> clear_pending_approval(issue_id, "approval resolved by run full access",
+                        persist_status: false,
+                        record_cancellation_audit: false,
+                        release_claim: false
+                      )
+                      |> resume_issue_after_guardrail_decision(
+                        issue_id,
+                        issue,
+                        approval,
+                        "allow_for_session",
+                        "run"
+                      )
+
+                    {:ok, %{approval: Approvals.snapshot_entry(resolved_approval), override: Overrides.snapshot_entry(override)}, state}
+
+                  {:error, _reason} ->
+                    state =
+                      clear_pending_approval(state, issue_id, "full access approval became stale",
+                        persist_status: false,
+                        record_cancellation_audit: false
+                      )
+
+                    {:ok, %{override: Overrides.snapshot_entry(override), approval_issue_id: issue_id}, state}
+                end
+
+              :error ->
+                {:ok, %{override: Overrides.snapshot_entry(override)}, state}
+            end
+          end
+      end
+    end
+  end
+
+  defp disable_run_full_access_override(%State{} = state, run_id, opts) do
+    if Config.settings!().guardrails.enabled != true do
+      {:error, :guardrails_disabled, state}
+    else
+      case Map.get(state.guardrail_overrides.runs, run_id) do
+        %Overrides{} = override ->
+          if !Overrides.active?(override) do
+            {:ok, %{override: Overrides.snapshot_entry(override), idempotent: true}, state}
+          else
+            with {:ok, state} <- register_operator_action(state, {:run_override, run_id}, "disable") do
+              updated_override =
+                Overrides.disable(override,
+                  reason: normalize_operator_value(Keyword.get(opts, :reason)) || "operator disabled full access"
+                )
+
+              AuditLog.put_guardrail_override(updated_override)
+              maybe_record_guardrail_override_lifecycle_audit(updated_override, "guardrail_full_access_disabled", opts)
+
+              state = %{state | guardrail_overrides: %{state.guardrail_overrides | runs: Map.delete(state.guardrail_overrides.runs, run_id)}}
+              {:ok, %{override: Overrides.snapshot_entry(updated_override)}, state}
+            end
+          end
+
+        _ ->
+          case find_run_override_snapshot(run_id) do
+            {:ok, %Overrides{} = override} ->
+              {:ok, %{override: Overrides.snapshot_entry(override), idempotent: true}, state}
+
+            _ ->
+              {:error, :override_not_found, state}
+          end
+      end
+    end
+  end
+
+  defp enable_workflow_full_access_override(%State{} = state, opts) do
+    if Config.settings!().guardrails.enabled != true do
+      {{:error, :guardrails_disabled}, state}
+    else
+      case state.guardrail_overrides.workflow do
+        %Overrides{} = override ->
+          if Overrides.active?(override) do
+            {{:ok, %{override: Overrides.snapshot_entry(override), idempotent: true}}, state}
+          else
+            case register_operator_action(state, :workflow_override, "enable") do
+              {:ok, state} ->
+                override =
+                  Overrides.full_access_override(:workflow, "workflow",
+                    ttl_ms: Config.settings!().guardrails.full_access_workflow_ttl_ms,
+                    reason: normalize_operator_value(Keyword.get(opts, :reason)),
+                    actor: normalize_operator_value(Keyword.get(opts, :actor))
+                  )
+
+                AuditLog.put_guardrail_override(override)
+                maybe_record_guardrail_override_lifecycle_audit(override, "guardrail_workflow_full_access_enabled", opts)
+
+                {{:ok, %{override: Overrides.snapshot_entry(override)}}, %{state | guardrail_overrides: %{state.guardrail_overrides | workflow: override}}}
+
+              {:error, reason, state} ->
+                {{:error, reason}, state}
+            end
+          end
+
+        _ ->
+          case register_operator_action(state, :workflow_override, "enable") do
+            {:ok, state} ->
+              override =
+                Overrides.full_access_override(:workflow, "workflow",
+                  ttl_ms: Config.settings!().guardrails.full_access_workflow_ttl_ms,
+                  reason: normalize_operator_value(Keyword.get(opts, :reason)),
+                  actor: normalize_operator_value(Keyword.get(opts, :actor))
+                )
+
+              AuditLog.put_guardrail_override(override)
+              maybe_record_guardrail_override_lifecycle_audit(override, "guardrail_workflow_full_access_enabled", opts)
+
+              {{:ok, %{override: Overrides.snapshot_entry(override)}}, %{state | guardrail_overrides: %{state.guardrail_overrides | workflow: override}}}
+
+            {:error, reason, state} ->
+              {{:error, reason}, state}
+          end
+      end
+    end
+  end
+
+  defp disable_workflow_full_access_override(%State{} = state, opts) do
+    if Config.settings!().guardrails.enabled != true do
+      {:error, :guardrails_disabled, state}
+    else
+      case state.guardrail_overrides.workflow do
+        %Overrides{} = override ->
+          if !Overrides.active?(override) do
+            {:ok, %{override: Overrides.snapshot_entry(override), idempotent: true}, state}
+          else
+            with {:ok, state} <- register_operator_action(state, :workflow_override, "disable") do
+              updated_override =
+                Overrides.disable(override,
+                  reason: normalize_operator_value(Keyword.get(opts, :reason)) || "operator disabled workflow full access"
+                )
+
+              AuditLog.put_guardrail_override(updated_override)
+              maybe_record_guardrail_override_lifecycle_audit(updated_override, "guardrail_workflow_full_access_disabled", opts)
+
+              {:ok, %{override: Overrides.snapshot_entry(updated_override)}, %{state | guardrail_overrides: %{state.guardrail_overrides | workflow: nil}}}
+            end
+          end
+
+        _ ->
+          case find_workflow_override_snapshot() do
+            {:ok, %Overrides{} = override} ->
+              {:ok, %{override: Overrides.snapshot_entry(override), idempotent: true}, state}
+
+            _ ->
+              {:error, :override_not_found, state}
+          end
+      end
+    end
+  end
+
+  defp explain_guardrail_approval_in_state(%State{} = state, approval_id) when is_binary(approval_id) do
+    case find_guardrail_approval_snapshot(state, approval_id) do
+      {:ok, %Approvals{} = approval} ->
+        override = Overrides.effective_override(state.guardrail_overrides, approval.run_id)
+        rules = effective_guardrail_rules(state, approval.run_id)
+
+        explanation =
+          Policy.explain_approval_request(
+            approval.method || "unknown",
+            approval.payload || %{},
+            %{
+              run_id: approval.run_id,
+              session_id: approval.session_id,
+              workspace_path: approval.workspace_path,
+              full_access_override: override,
+              guardrail_rules: rules
+            }
+          )
+
+        {:ok, %{approval: Approvals.snapshot_entry(approval), explanation: explanation}, state}
+
+      :error ->
+        {:error, :approval_not_found, state}
+    end
+  end
+
+  defp apply_approval_resume_decision(%State{} = state, issue_id, %Issue{} = issue, %Approvals{} = approval, decision, opts) do
+    with {:ok, state, rule} <- build_rule_for_approval_decision(state, approval, decision, opts) do
+      state =
+        state
+        |> clear_pending_approval(issue_id, "approval resolved by operator",
+          persist_status: false,
+          record_cancellation_audit: false,
+          release_claim: false
+        )
+        |> resume_issue_after_guardrail_decision(issue_id, issue, approval, decision, rule && rule.scope)
+
+      {:ok, state,
+       %{
+         approval: Approvals.snapshot_entry(approval),
+         rule: rule && Rule.snapshot_entry(rule)
+       }}
+    end
+  end
+
+  defp build_rule_for_approval_decision(%State{} = state, approval, decision, opts)
+       when decision in ["allow_once", "allow_for_session", "allow_via_rule"] do
+    scope =
+      case decision do
+        "allow_via_rule" -> normalize_operator_value(Keyword.get(opts, :scope)) || "workflow"
+        _ -> "run"
+      end
+
+    rule =
+      Rule.from_approval(
+        approval,
+        decision,
+        scope: scope,
+        created_by: normalize_operator_value(Keyword.get(opts, :actor)),
+        reason: normalize_operator_value(Keyword.get(opts, :reason))
+      )
+
+    AuditLog.put_guardrail_rule(rule)
+    maybe_record_guardrail_rule_created_audit(approval, rule, decision)
+
+    {:ok, %{state | guardrail_rules: Map.put(state.guardrail_rules, rule.id, rule)}, rule}
+  end
+
+  defp build_rule_for_approval_decision(state, _approval, _decision, _opts), do: {:ok, state, nil}
+
+  defp resume_issue_after_guardrail_decision(%State{} = state, issue_id, %Issue{} = issue, %Approvals{} = approval, decision, decision_scope)
+       when is_binary(issue_id) and is_binary(decision) do
+    dispatch_metadata = %{
+      run_id: approval.run_id,
+      resume_approval_id: approval.id,
+      decision: decision,
+      decision_scope: decision_scope,
+      workspace_path: approval.workspace_path,
+      worker_host: approval.worker_host,
+      identifier: approval.issue_identifier
+    }
+
+    if dispatch_slots_available?(issue, state) and worker_slots_available?(state, approval.worker_host) do
+      dispatch_issue(state, issue, nil, approval.worker_host, dispatch_metadata)
+    else
+      schedule_issue_retry(
+        state,
+        issue_id,
+        1,
+        dispatch_metadata
+        |> Map.put(:error, "guardrail approval waiting for capacity")
+        |> Map.put(:delay_type, :continuation)
+      )
+    end
+  end
+
+  defp fetch_issue_for_resume(%Approvals{issue_id: issue_id}) when is_binary(issue_id) do
+    case Tracker.fetch_issue_states_by_ids([issue_id]) do
+      {:ok, [%Issue{} = issue | _]} ->
+        if MapSet.member?(active_state_set(), normalize_issue_state(issue.state)) do
+          {:ok, issue}
+        else
+          {:error, {:issue_not_active, issue.state}}
+        end
+
+      {:ok, []} ->
+        {:error, :issue_not_found}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  defp fetch_issue_for_resume(_approval), do: {:error, :issue_not_found}
+
+  defp find_pending_approval(%State{} = state, approval_id) when is_binary(approval_id) do
+    Enum.find_value(state.pending_approvals, :error, fn {issue_id, approval} ->
+      if approval.id == approval_id, do: {:ok, issue_id, approval}, else: nil
+    end)
+  end
+
+  defp find_pending_approval_by_run_id(%State{} = state, run_id) when is_binary(run_id) do
+    Enum.find_value(state.pending_approvals, :error, fn {issue_id, approval} ->
+      if approval.run_id == run_id, do: {:ok, issue_id, approval}, else: nil
+    end)
+  end
+
+  defp handle_missing_guardrail_approval_decision(%State{} = state, approval_id, decision)
+       when is_binary(approval_id) and is_binary(decision) do
+    case find_guardrail_approval_snapshot(state, approval_id) do
+      {:ok, %Approvals{} = approval} ->
+        cond do
+          approval.decision == decision and approval.status in ["approved", "denied_by_operator"] ->
+            {:ok, %{approval: Approvals.snapshot_entry(approval), idempotent: true}, state}
+
+          is_binary(approval.decision) and approval.decision != decision ->
+            {:error, {:approval_already_resolved, approval.decision}, state}
+
+          approval.status == "cancelled" ->
+            {:error, :approval_stale, state}
+
+          approval.status in ["pending_review", "denied_by_policy"] ->
+            {:error, :approval_stale, state}
+
+          true ->
+            {:error, :approval_not_found, state}
+        end
+
+      :error ->
+        {:error, :approval_not_found, state}
+    end
+  end
+
+  defp find_guardrail_approval_snapshot(%State{} = state, approval_id) when is_binary(approval_id) do
+    case find_pending_approval(state, approval_id) do
+      {:ok, _issue_id, %Approvals{} = approval} ->
+        {:ok, approval}
+
+      :error ->
+        case AuditLog.get_guardrail_approval(approval_id) do
+          {:ok, snapshot} ->
+            case Approvals.from_snapshot(snapshot) do
+              %Approvals{} = approval -> {:ok, approval}
+              _ -> :error
+            end
+
+          _ ->
+            :error
+        end
+    end
+  end
+
+  defp find_guardrail_rule(%State{} = state, rule_id) when is_binary(rule_id) do
+    case Map.get(state.guardrail_rules, rule_id) do
+      %Rule{} = rule ->
+        {:ok, rule}
+
+      _ ->
+        case AuditLog.get_guardrail_rule(rule_id) do
+          {:ok, snapshot} ->
+            case Rule.from_snapshot(snapshot) do
+              %Rule{} = rule -> {:ok, rule}
+              _ -> :error
+            end
+
+          _ ->
+            :error
+        end
+    end
+  end
+
+  defp find_run_override_snapshot(run_id) when is_binary(run_id) do
+    with {:ok, overrides} <- AuditLog.list_guardrail_overrides(active_only: false),
+         %{} = snapshot <-
+           Enum.find(overrides, fn snapshot ->
+             Map.get(snapshot, "scope") == "run" and Map.get(snapshot, "scope_key") == run_id
+           end),
+         %Overrides{} = override <- Overrides.from_snapshot(snapshot) do
+      {:ok, override}
+    else
+      _ -> :error
+    end
+  end
+
+  defp find_workflow_override_snapshot do
+    with {:ok, overrides} <- AuditLog.list_guardrail_overrides(active_only: false),
+         %{} = snapshot <-
+           Enum.find(overrides, fn snapshot ->
+             Map.get(snapshot, "scope") == "workflow"
+           end),
+         %Overrides{} = override <- Overrides.from_snapshot(snapshot) do
+      {:ok, override}
+    else
+      _ -> :error
+    end
+  end
+
+  defp put_guardrail_rule(%State{} = state, %Rule{id: rule_id} = rule) when is_binary(rule_id) do
+    rules =
+      if Rule.active?(rule) do
+        Map.put(state.guardrail_rules, rule_id, rule)
+      else
+        Map.delete(state.guardrail_rules, rule_id)
+      end
+
+    %{state | guardrail_rules: rules}
+  end
+
+  defp guardrail_rule_inactive?(%Rule{} = rule), do: !Rule.active?(rule)
+  defp guardrail_rule_inactive?(_rule), do: true
+
+  defp register_operator_action(%State{} = state, resource_key, action_name) do
+    now_ms = System.monotonic_time(:millisecond)
+
+    recent =
+      state.operator_action_recent
+      |> Enum.reject(fn {_key, meta} ->
+        now_ms - Map.get(meta, :at_ms, 0) > @guardrail_action_cooldown_ms
+      end)
+      |> Map.new()
+
+    case Map.get(recent, resource_key) do
+      %{action: previous_action, at_ms: at_ms}
+      when is_binary(previous_action) and previous_action != action_name and now_ms - at_ms <= @guardrail_action_cooldown_ms ->
+        {:error, :operator_action_rate_limited, %{state | operator_action_recent: recent}}
+
+      _ ->
+        {:ok,
+         %{
+           state
+           | operator_action_recent: Map.put(recent, resource_key, %{action: action_name, at_ms: now_ms})
+         }}
+    end
+  end
+
+  defp maybe_record_approval_decision_audit(%Approvals{issue_identifier: issue_identifier, run_id: run_id} = approval)
+       when is_binary(issue_identifier) and is_binary(run_id) do
+    AuditLog.record_run_event(
+      issue_identifier,
+      run_id,
+      Approvals.decision_audit_event(approval),
+      %{
+        "pending_approval" => Approvals.snapshot_entry(approval)
+      }
+    )
+  end
+
+  defp maybe_record_approval_decision_audit(_approval), do: :ok
+
+  defp maybe_record_guardrail_rule_created_audit(%Approvals{issue_identifier: issue_identifier, run_id: run_id}, %Rule{} = rule, decision)
+       when is_binary(issue_identifier) and is_binary(run_id) do
+    AuditLog.record_run_event(issue_identifier, run_id, %{
+      kind: "guardrail",
+      event: "guardrail_rule_created",
+      summary: "guardrail rule created from #{decision}",
+      details: %{
+        "rule" => Rule.snapshot_entry(rule),
+        "decision" => decision
+      }
+    })
+  end
+
+  defp maybe_record_guardrail_rule_created_audit(_approval, _rule, _decision), do: :ok
+
+  defp maybe_record_guardrail_rule_lifecycle_audit(%Rule{} = rule, event_name, opts)
+       when is_binary(event_name) and is_list(opts) do
+    with source_approval_id when is_binary(source_approval_id) <- rule.source_approval_id,
+         {:ok, approval_snapshot} <- AuditLog.get_guardrail_approval(source_approval_id),
+         %Approvals{} = approval <- Approvals.from_snapshot(approval_snapshot),
+         issue_identifier when is_binary(issue_identifier) <- approval.issue_identifier,
+         run_id when is_binary(run_id) <- approval.run_id do
+      AuditLog.record_run_event(issue_identifier, run_id, %{
+        kind: "guardrail",
+        event: event_name,
+        summary: guardrail_rule_lifecycle_summary(event_name, rule),
+        details: %{
+          "rule" => Rule.snapshot_entry(rule),
+          "actor" => normalize_operator_value(Keyword.get(opts, :actor)),
+          "reason" => normalize_operator_value(Keyword.get(opts, :reason))
+        }
+      })
+    else
+      _ -> :ok
+    end
+  end
+
+  defp maybe_record_guardrail_override_lifecycle_audit(%Overrides{} = override, event_name, opts)
+       when is_binary(event_name) and is_list(opts) do
+    _ = {override, event_name, opts}
+    :ok
+  end
+
+  defp maybe_record_guardrail_rule_consumed_audit(running_entry, %Rule{} = rule, %Rule{} = updated_rule) do
+    AuditLog.record_run_event(running_entry.identifier, running_entry.run_id, %{
+      kind: "guardrail",
+      event: "guardrail_rule_consumed",
+      summary: "guardrail rule matched during run",
+      details: %{
+        "rule_id" => rule.id,
+        "remaining_uses_before" => rule.remaining_uses,
+        "remaining_uses_after" => updated_rule.remaining_uses,
+        "enabled_after" => updated_rule.enabled
+      }
+    })
+  end
+
+  defp maybe_record_guardrail_rule_consumed_audit(_running_entry, _rule, _updated_rule), do: :ok
+
+  defp guardrail_rule_lifecycle_summary("guardrail_rule_enabled", %Rule{id: rule_id}),
+    do: "guardrail rule enabled: #{rule_id}"
+
+  defp guardrail_rule_lifecycle_summary("guardrail_rule_disabled", %Rule{id: rule_id}),
+    do: "guardrail rule disabled: #{rule_id}"
+
+  defp guardrail_rule_lifecycle_summary("guardrail_rule_expired", %Rule{id: rule_id}),
+    do: "guardrail rule expired: #{rule_id}"
+
+  defp guardrail_rule_lifecycle_summary(_event_name, %Rule{id: rule_id}),
+    do: "guardrail rule updated: #{rule_id}"
+
+  defp complete_denied_approval_issue(%State{} = state, %Approvals{issue_id: issue_id, issue_state: issue_state})
+       when is_binary(issue_id) and is_binary(issue_state) do
+    %{
+      state
+      | completed: MapSet.put(state.completed, issue_id),
+        completed_active_states: Map.put(state.completed_active_states, issue_id, normalize_issue_state(issue_state)),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+    }
+  end
+
+  defp complete_denied_approval_issue(%State{} = state, %Approvals{issue_id: issue_id})
+       when is_binary(issue_id),
+       do: complete_issue(state, issue_id)
+
+  defp complete_denied_approval_issue(%State{} = state, _approval), do: state
+
+  defp expire_run_scoped_guardrails(%State{} = state, %{run_id: run_id})
+       when is_binary(run_id) do
+    rules =
+      Enum.reduce(state.guardrail_rules, %{}, fn {rule_id, rule}, acc ->
+        if rule.scope == "run" and rule.scope_key == run_id do
+          AuditLog.put_guardrail_rule(Rule.disable(rule, reason: "run ended"))
+          acc
+        else
+          Map.put(acc, rule_id, rule)
+        end
+      end)
+
+    overrides =
+      case Map.get(state.guardrail_overrides.runs, run_id) do
+        %Overrides{} = override ->
+          AuditLog.put_guardrail_override(Overrides.disable(override, reason: "run ended"))
+          %{state.guardrail_overrides | runs: Map.delete(state.guardrail_overrides.runs, run_id)}
+
+        _ ->
+          state.guardrail_overrides
+      end
+
+    %{state | guardrail_rules: rules, guardrail_overrides: overrides}
+  end
+
+  defp expire_run_scoped_guardrails(%State{} = state, _running_entry), do: state
+
+  defp reason_to_string(reason) when is_binary(reason), do: reason
+  defp reason_to_string(reason), do: inspect(reason)
+
+  defp normalize_operator_value(value) when is_binary(value) do
+    case String.trim(value) do
+      "" -> nil
+      trimmed -> trimmed
+    end
+  end
+
+  defp normalize_operator_value(value) when is_atom(value), do: value |> Atom.to_string() |> normalize_operator_value()
+  defp normalize_operator_value(value) when is_integer(value), do: Integer.to_string(value)
+  defp normalize_operator_value(_value), do: nil
 
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
@@ -1082,6 +2778,134 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec snapshot() :: map() | :timeout | :unavailable
   def snapshot, do: snapshot(__MODULE__, 15_000)
+
+  @spec decide_guardrail_approval(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def decide_guardrail_approval(approval_id, decision, opts \\ []) do
+    decide_guardrail_approval(__MODULE__, approval_id, decision, opts)
+  end
+
+  @spec decide_guardrail_approval(GenServer.server(), String.t(), String.t(), keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def decide_guardrail_approval(server, approval_id, decision, opts)
+      when is_binary(approval_id) and is_binary(decision) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:decide_guardrail_approval, approval_id, decision, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec disable_guardrail_rule(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def disable_guardrail_rule(rule_id, opts \\ []) do
+    disable_guardrail_rule(__MODULE__, rule_id, opts)
+  end
+
+  @spec disable_guardrail_rule(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def disable_guardrail_rule(server, rule_id, opts) when is_binary(rule_id) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:disable_guardrail_rule, rule_id, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec enable_guardrail_rule(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enable_guardrail_rule(rule_id, opts \\ []) do
+    enable_guardrail_rule(__MODULE__, rule_id, opts)
+  end
+
+  @spec enable_guardrail_rule(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enable_guardrail_rule(server, rule_id, opts) when is_binary(rule_id) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:enable_guardrail_rule, rule_id, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec expire_guardrail_rule(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def expire_guardrail_rule(rule_id, opts \\ []) do
+    expire_guardrail_rule(__MODULE__, rule_id, opts)
+  end
+
+  @spec expire_guardrail_rule(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def expire_guardrail_rule(server, rule_id, opts) when is_binary(rule_id) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:expire_guardrail_rule, rule_id, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec explain_guardrail_approval(String.t()) :: {:ok, map()} | {:error, term()}
+  def explain_guardrail_approval(approval_id) do
+    explain_guardrail_approval(__MODULE__, approval_id)
+  end
+
+  @spec explain_guardrail_approval(GenServer.server(), String.t()) :: {:ok, map()} | {:error, term()}
+  def explain_guardrail_approval(server, approval_id) when is_binary(approval_id) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:explain_guardrail_approval, approval_id}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec enable_full_access_for_run(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enable_full_access_for_run(run_id, opts \\ []) do
+    enable_full_access_for_run(__MODULE__, run_id, opts)
+  end
+
+  @spec enable_full_access_for_run(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enable_full_access_for_run(server, run_id, opts) when is_binary(run_id) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:enable_full_access_for_run, run_id, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec disable_full_access_for_run(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def disable_full_access_for_run(run_id, opts \\ []) do
+    disable_full_access_for_run(__MODULE__, run_id, opts)
+  end
+
+  @spec disable_full_access_for_run(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def disable_full_access_for_run(server, run_id, opts) when is_binary(run_id) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:disable_full_access_for_run, run_id, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec enable_full_access_for_workflow(keyword()) :: {:ok, map()} | {:error, term()}
+  def enable_full_access_for_workflow(opts \\ []) do
+    enable_full_access_for_workflow(__MODULE__, opts)
+  end
+
+  @spec enable_full_access_for_workflow(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
+  def enable_full_access_for_workflow(server, opts) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:enable_full_access_for_workflow, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
+
+  @spec disable_full_access_for_workflow(keyword()) :: {:ok, map()} | {:error, term()}
+  def disable_full_access_for_workflow(opts \\ []) do
+    disable_full_access_for_workflow(__MODULE__, opts)
+  end
+
+  @spec disable_full_access_for_workflow(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
+  def disable_full_access_for_workflow(server, opts) do
+    if Process.whereis(server) do
+      GenServer.call(server, {:disable_full_access_for_workflow, opts}, 30_000)
+    else
+      {:error, :unavailable}
+    end
+  end
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
   def snapshot(server, timeout) do
@@ -1115,6 +2939,8 @@ defmodule SymphonyElixir.Orchestrator do
           session_id: metadata.session_id,
           codex_app_server_pid: metadata.codex_app_server_pid,
           codex_input_tokens: metadata.codex_input_tokens,
+          codex_cached_input_tokens: Map.get(metadata, :codex_cached_input_tokens, 0),
+          codex_uncached_input_tokens: Map.get(metadata, :codex_uncached_input_tokens, 0),
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
           turn_count: Map.get(metadata, :turn_count, 0),
@@ -1140,10 +2966,32 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    pending_approvals =
+      state.pending_approvals
+      |> Enum.map(fn {issue_id, approval} ->
+        approval
+        |> Approvals.snapshot_entry()
+        |> Map.put(:issue_id, issue_id)
+      end)
+
+    guardrail_rules =
+      state.guardrail_rules
+      |> Map.values()
+      |> Enum.filter(&Rule.active?/1)
+      |> Enum.map(&Rule.snapshot_entry/1)
+
+    guardrail_overrides =
+      state.guardrail_overrides
+      |> Overrides.active_entries(now)
+      |> Enum.map(&Overrides.snapshot_entry/1)
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
+       pending_approvals: pending_approvals,
+       guardrail_rules: guardrail_rules,
+       guardrail_overrides: guardrail_overrides,
        codex_totals: state.codex_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
@@ -1152,6 +3000,104 @@ defmodule SymphonyElixir.Orchestrator do
          poll_interval_ms: state.poll_interval_ms
        }
      }, state}
+  end
+
+  def handle_call({:decide_guardrail_approval, approval_id, decision, opts}, _from, state) do
+    case handle_guardrail_approval_decision(state, approval_id, decision, opts) do
+      {:ok, response, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:disable_guardrail_rule, rule_id, opts}, _from, state) do
+    case disable_guardrail_rule_in_state(state, rule_id, opts) do
+      {:ok, response, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:enable_guardrail_rule, rule_id, opts}, _from, state) do
+    case enable_guardrail_rule_in_state(state, rule_id, opts) do
+      {:ok, response, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:expire_guardrail_rule, rule_id, opts}, _from, state) do
+    case expire_guardrail_rule_in_state(state, rule_id, opts) do
+      {:ok, response, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:explain_guardrail_approval, approval_id}, _from, state) do
+    case explain_guardrail_approval_in_state(state, approval_id) do
+      {:ok, response, state} ->
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:enable_full_access_for_run, run_id, opts}, _from, state) do
+    case enable_run_full_access_override(state, run_id, opts) do
+      {:ok, response, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:disable_full_access_for_run, run_id, opts}, _from, state) do
+    case disable_run_full_access_override(state, run_id, opts) do
+      {:ok, response, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:enable_full_access_for_workflow, opts}, _from, state) do
+    case enable_workflow_full_access_override(state, opts) do
+      {{:ok, response}, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {{:error, reason}, state} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:disable_full_access_for_workflow, opts}, _from, state) do
+    case disable_workflow_full_access_override(state, opts) do
+      {:ok, response, state} ->
+        notify_dashboard()
+        {:reply, {:ok, response}, state}
+
+      {:error, reason, state} ->
+        {:reply, {:error, reason}, state}
+    end
   end
 
   def handle_call(:request_refresh, _from, state) do
@@ -1172,13 +3118,18 @@ defmodule SymphonyElixir.Orchestrator do
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
+    codex_cached_input_tokens = Map.get(running_entry, :codex_cached_input_tokens, 0)
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
     codex_total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
     codex_app_server_pid = Map.get(running_entry, :codex_app_server_pid)
     last_reported_input = Map.get(running_entry, :codex_last_reported_input_tokens, 0)
+    last_reported_cached_input = Map.get(running_entry, :codex_last_reported_cached_input_tokens, 0)
     last_reported_output = Map.get(running_entry, :codex_last_reported_output_tokens, 0)
     last_reported_total = Map.get(running_entry, :codex_last_reported_total_tokens, 0)
     turn_count = Map.get(running_entry, :turn_count, 0)
+
+    next_input_tokens = codex_input_tokens + token_delta.input_tokens
+    next_cached_input_tokens = codex_cached_input_tokens + token_delta.cached_input_tokens
 
     {
       Map.merge(running_entry, %{
@@ -1187,10 +3138,13 @@ defmodule SymphonyElixir.Orchestrator do
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
         codex_app_server_pid: codex_app_server_pid_for_update(codex_app_server_pid, update),
-        codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
+        codex_input_tokens: next_input_tokens,
+        codex_cached_input_tokens: next_cached_input_tokens,
+        codex_uncached_input_tokens: max(next_input_tokens - next_cached_input_tokens, 0),
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
+        codex_last_reported_cached_input_tokens: max(last_reported_cached_input, token_delta.cached_input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
         turn_count: turn_count_for_update(turn_count, running_entry.session_id, update)
@@ -1336,6 +3290,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_token_delta(codex_totals, token_delta) do
     input_tokens = Map.get(codex_totals, :input_tokens, 0) + token_delta.input_tokens
+
+    cached_input_tokens =
+      Map.get(codex_totals, :cached_input_tokens, 0) + Map.get(token_delta, :cached_input_tokens, 0)
+
     output_tokens = Map.get(codex_totals, :output_tokens, 0) + token_delta.output_tokens
     total_tokens = Map.get(codex_totals, :total_tokens, 0) + token_delta.total_tokens
 
@@ -1344,6 +3302,8 @@ defmodule SymphonyElixir.Orchestrator do
 
     %{
       input_tokens: max(0, input_tokens),
+      cached_input_tokens: max(0, cached_input_tokens),
+      uncached_input_tokens: max(0, input_tokens - cached_input_tokens),
       output_tokens: max(0, output_tokens),
       total_tokens: max(0, total_tokens),
       seconds_running: max(0, seconds_running)
@@ -1363,6 +3323,12 @@ defmodule SymphonyElixir.Orchestrator do
       ),
       compute_token_delta(
         running_entry,
+        :cached_input,
+        usage,
+        :codex_last_reported_cached_input_tokens
+      ),
+      compute_token_delta(
+        running_entry,
         :output,
         usage,
         :codex_last_reported_output_tokens
@@ -1375,12 +3341,14 @@ defmodule SymphonyElixir.Orchestrator do
       )
     }
     |> Tuple.to_list()
-    |> then(fn [input, output, total] ->
+    |> then(fn [input, cached_input, output, total] ->
       %{
         input_tokens: input.delta,
+        cached_input_tokens: cached_input.delta,
         output_tokens: output.delta,
         total_tokens: total.delta,
         input_reported: input.reported,
+        cached_input_reported: cached_input.reported,
         output_reported: output.reported,
         total_reported: total.reported
       }
@@ -1553,21 +3521,25 @@ defmodule SymphonyElixir.Orchestrator do
   defp integer_token_map?(payload) do
     token_fields = [
       :input_tokens,
+      :cached_input_tokens,
       :output_tokens,
       :total_tokens,
       :prompt_tokens,
       :completion_tokens,
       :inputTokens,
+      :cachedInputTokens,
       :outputTokens,
       :totalTokens,
       :promptTokens,
       :completionTokens,
       "input_tokens",
+      "cached_input_tokens",
       "output_tokens",
       "total_tokens",
       "prompt_tokens",
       "completion_tokens",
       "inputTokens",
+      "cachedInputTokens",
       "outputTokens",
       "totalTokens",
       "promptTokens",
@@ -1593,6 +3565,17 @@ defmodule SymphonyElixir.Orchestrator do
         :promptTokens,
         "inputTokens",
         :inputTokens
+      ])
+
+  defp get_token_usage(usage, :cached_input),
+    do:
+      payload_get(usage, [
+        "cached_input_tokens",
+        :cached_input_tokens,
+        "cachedInputTokens",
+        :cachedInputTokens,
+        "cached_input",
+        :cached_input
       ])
 
   defp get_token_usage(usage, :output),

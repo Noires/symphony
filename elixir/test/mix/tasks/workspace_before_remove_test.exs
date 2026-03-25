@@ -305,12 +305,10 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       File.mkdir_p!(bin_dir)
       File.write!(log_path, "")
       original_path = System.get_env("PATH") || ""
-      path_with_binaries = Enum.join([bin_dir, original_path], ":")
+      path_with_binaries = join_path_entries([bin_dir, original_path])
 
       Enum.each(scripts, fn {name, script} ->
-        path = Path.join(bin_dir, name)
-        File.write!(path, script)
-        File.chmod!(path, 0o755)
+        SymphonyElixir.TestSupport.install_fake_executable!(bin_dir, name, script)
       end)
 
       with_env(
@@ -328,7 +326,7 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
   end
 
   defp with_path(paths, fun) do
-    with_env(%{"PATH" => Enum.join(paths, ":")}, fun)
+    with_env(%{"PATH" => join_path_entries(paths)}, fun)
   end
 
   defp with_env(overrides, fun) do
@@ -362,6 +360,14 @@ defmodule Mix.Tasks.Workspace.BeforeRemoveTest do
       File.cd!(original_cwd)
       File.rm_rf!(root)
     end
+  end
+
+  defp join_path_entries(paths) do
+    separator = if match?({:win32, _}, :os.type()), do: ";", else: ":"
+
+    paths
+    |> Enum.reject(&(&1 in [nil, ""]))
+    |> Enum.join(separator)
   end
 
   defp capture_task_output(fun) do

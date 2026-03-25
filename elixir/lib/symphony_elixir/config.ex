@@ -4,21 +4,10 @@ defmodule SymphonyElixir.Config do
   """
 
   alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.GitHubAccess
+  alias SymphonyElixir.Guardrails.Overrides
+  alias SymphonyElixir.SettingsOverlay
   alias SymphonyElixir.Workflow
-
-  @default_prompt_template """
-  You are working on a Linear issue.
-
-  Identifier: {{ issue.identifier }}
-  Title: {{ issue.title }}
-
-  Body:
-  {% if issue.description %}
-  {{ issue.description }}
-  {% else %}
-  No description provided.
-  {% endif %}
-  """
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
@@ -30,7 +19,12 @@ defmodule SymphonyElixir.Config do
   def settings do
     case Workflow.current() do
       {:ok, %{config: config}} when is_map(config) ->
-        Schema.parse(config)
+        with {:ok, settings} <-
+               config
+               |> SettingsOverlay.apply_to_workflow_config()
+               |> Schema.parse() do
+          {:ok, GitHubAccess.apply_tracker_token(settings)}
+        end
 
       {:error, reason} ->
         {:error, reason}
@@ -72,14 +66,21 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @spec guardrails_enabled?() :: boolean()
+  def guardrails_enabled? do
+    settings!().guardrails.enabled == true
+  end
+
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
+    default_prompt = default_prompt_template()
+
     case Workflow.current() do
       {:ok, %{prompt_template: prompt}} ->
-        if String.trim(prompt) == "", do: @default_prompt_template, else: prompt
+        if String.trim(prompt) == "", do: default_prompt, else: prompt
 
       _ ->
-        @default_prompt_template
+        default_prompt
     end
   end
 
@@ -104,12 +105,16 @@ defmodule SymphonyElixir.Config do
     with {:ok, settings} <- settings() do
       with {:ok, turn_sandbox_policy} <-
              Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
+        runtime_settings = %{
+          approval_policy: settings.codex.approval_policy,
+          thread_sandbox: settings.codex.thread_sandbox,
+          turn_sandbox_policy: turn_sandbox_policy
+        }
+
         {:ok,
-         %{
-           approval_policy: settings.codex.approval_policy,
-           thread_sandbox: settings.codex.thread_sandbox,
-           turn_sandbox_policy: turn_sandbox_policy
-         }}
+         runtime_settings
+         |> Overrides.apply_runtime_settings(Keyword.get(opts, :guardrails_override))
+         |> Overrides.apply_runtime_settings(Keyword.get(opts, :full_access_override))}
       end
     end
   end
@@ -119,7 +124,7 @@ defmodule SymphonyElixir.Config do
       is_nil(settings.tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
+      settings.tracker.kind not in ["linear", "memory", "trello", "github"] ->
         {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
 
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
@@ -128,9 +133,63 @@ defmodule SymphonyElixir.Config do
       settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
 
+      settings.tracker.kind == "trello" and not is_binary(settings.tracker.api_key) ->
+        {:error, :missing_trello_api_key}
+
+      settings.tracker.kind == "trello" and not is_binary(settings.tracker.api_token) ->
+        {:error, :missing_trello_api_token}
+
+      settings.tracker.kind == "trello" and not is_binary(settings.tracker.board_id) ->
+        {:error, :missing_trello_board_id}
+
+      settings.tracker.kind == "github" and not is_binary(settings.tracker.api_token) ->
+        {:error, :missing_github_api_token}
+
+      settings.tracker.kind == "github" and not is_binary(settings.tracker.owner) ->
+        {:error, :missing_github_owner}
+
+      settings.tracker.kind == "github" and not is_binary(settings.tracker.repo) ->
+        {:error, :missing_github_repo}
+
+      settings.tracker.kind == "github" and not is_binary(settings.tracker.project_number) ->
+        {:error, :missing_github_project_number}
+
+      settings.tracker.kind == "github" and not github_project_number?(settings.tracker.project_number) ->
+        {:error, :invalid_github_project_number}
+
       true ->
         :ok
     end
+  end
+
+  defp default_prompt_template do
+    tracker_label =
+      case settings() do
+        {:ok, settings} ->
+          case settings.tracker.kind do
+            "trello" -> "Trello card"
+            "linear" -> "Linear issue"
+            "github" -> "GitHub issue"
+            _ -> "tracker issue"
+          end
+
+        _ ->
+          "tracker issue"
+      end
+
+    """
+    You are working on a #{tracker_label}.
+
+    Identifier: {{ issue.identifier }}
+    Title: {{ issue.title }}
+
+    Body:
+    {% if issue.description %}
+    {{ issue.description }}
+    {% else %}
+    No description provided.
+    {% endif %}
+    """
   end
 
   defp format_config_error(reason) do
@@ -151,4 +210,13 @@ defmodule SymphonyElixir.Config do
         "Invalid WORKFLOW.md config: #{inspect(other)}"
     end
   end
+
+  defp github_project_number?(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {number, ""} when number > 0 -> true
+      _ -> false
+    end
+  end
+
+  defp github_project_number?(_value), do: false
 end

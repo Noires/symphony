@@ -1105,6 +1105,8 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp humanize_codex_event(:turn_input_required, _message, _payload), do: "turn blocked: waiting for user input"
+  defp humanize_codex_event(:approval_required, _message, payload), do: humanize_guardrail_review(payload)
+  defp humanize_codex_event(:approval_denied, _message, payload), do: humanize_guardrail_denial(payload)
 
   defp humanize_codex_event(:approval_auto_approved, message, payload) do
     method =
@@ -1151,6 +1153,24 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_event(:turn_cancelled, _message, _payload), do: "turn cancelled"
   defp humanize_codex_event(:malformed, _message, _payload), do: "malformed JSON event from codex"
   defp humanize_codex_event(_event, _message, _payload), do: nil
+
+  defp humanize_guardrail_review(payload) do
+    summary =
+      map_path(payload, ["evaluation", "summary"]) ||
+        map_path(payload, [:evaluation, :summary]) ||
+        humanize_codex_payload(payload)
+
+    "approval pending operator review: #{summary}"
+  end
+
+  defp humanize_guardrail_denial(payload) do
+    summary =
+      map_path(payload, ["evaluation", "summary"]) ||
+        map_path(payload, [:evaluation, :summary]) ||
+        humanize_codex_payload(payload)
+
+    "approval denied by policy: #{summary}"
+  end
 
   defp unwrap_codex_message_payload(%{} = message) do
     cond do

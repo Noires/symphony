@@ -76,7 +76,7 @@ defmodule Mix.Tasks.PrBody.Check do
 
   defp extract_template_headings(template, template_path) do
     headings =
-      Regex.scan(~r/^\#{4,6}\s+.+$/m, template)
+      Regex.scan(~r/^\#{4,6}\s+.+$/m, normalize_newlines(template))
       |> Enum.map(&hd/1)
 
     if headings == [] do
@@ -99,23 +99,29 @@ defmodule Mix.Tasks.PrBody.Check do
   end
 
   defp lint(template, body, headings) do
+    normalized_template = normalize_newlines(template)
+    normalized_body = normalize_newlines(body)
+    template_doc = parse_sections(normalized_template, headings)
+    body_doc = parse_sections(normalized_body, headings)
+
     []
-    |> check_required_headings(body, headings)
-    |> check_order(body, headings)
+    |> check_required_headings(normalized_body, headings)
+    |> check_order(body_doc, headings)
     |> check_no_placeholders(body)
-    |> check_sections_from_template(template, body, headings)
+    |> check_heading_delimiters(body_doc)
+    |> check_sections_from_template(template_doc, body_doc, headings)
   end
 
   defp check_required_headings(errors, body, headings) do
-    missing = Enum.filter(headings, fn heading -> heading_position(body, heading) == :nomatch end)
+    missing = Enum.filter(headings, fn heading -> not heading_present?(body, heading) end)
     errors ++ Enum.map(missing, fn heading -> "Missing required heading: #{heading}" end)
   end
 
-  defp check_order(errors, body, headings) do
+  defp check_order(errors, body_doc, headings) do
     positions =
       headings
-      |> Enum.map(&heading_position(body, &1))
-      |> Enum.reject(&(&1 == :nomatch))
+      |> Enum.map(&Enum.find_index(body_doc.order, fn heading -> heading == &1 end))
+      |> Enum.reject(&is_nil/1)
 
     if positions == Enum.sort(positions), do: errors, else: errors ++ ["Required headings are out of order."]
   end
@@ -128,10 +134,18 @@ defmodule Mix.Tasks.PrBody.Check do
     end
   end
 
-  defp check_sections_from_template(errors, template, body, headings) do
+  defp check_heading_delimiters(errors, body_doc) do
+    body_doc.missing_delimiter_after_heading
+    |> Enum.sort()
+    |> Enum.reduce(errors, fn heading, acc ->
+      acc ++ ["Heading must be followed by a blank line: #{heading}"]
+    end)
+  end
+
+  defp check_sections_from_template(errors, template_doc, body_doc, headings) do
     Enum.reduce(headings, errors, fn heading, acc ->
-      template_section = capture_heading_section(template, heading, headings)
-      body_section = capture_heading_section(body, heading, headings)
+      template_section = Map.get(template_doc.sections, heading, "")
+      body_section = Map.get(body_doc.sections, heading)
 
       cond do
         is_nil(body_section) ->
@@ -168,49 +182,89 @@ defmodule Mix.Tasks.PrBody.Check do
     end
   end
 
-  defp heading_position(body, heading) do
-    case :binary.match(body, heading) do
-      {idx, _len} -> idx
-      :nomatch -> :nomatch
+  defp parse_sections(doc, headings) do
+    required_headings = MapSet.new(headings)
+
+    doc
+    |> String.split("\n", trim: false)
+    |> Enum.reduce(initial_parse_state(), fn line, state ->
+      parse_line(line, state, required_headings)
+    end)
+    |> finalize_parse_state()
+  end
+
+  defp initial_parse_state do
+    %{
+      current_heading: nil,
+      current_lines: [],
+      order: [],
+      sections: %{},
+      awaiting_blank_line: false,
+      missing_delimiter_after_heading: MapSet.new()
+    }
+  end
+
+  defp parse_line(line, state, required_headings) do
+    cond do
+      MapSet.member?(required_headings, line) ->
+        state
+        |> close_current_section()
+        |> start_section(line)
+
+      is_nil(state.current_heading) ->
+        state
+
+      state.awaiting_blank_line and line == "" ->
+        %{state | awaiting_blank_line: false}
+
+      state.awaiting_blank_line ->
+        %{
+          state
+          | awaiting_blank_line: false,
+            current_lines: [line],
+            missing_delimiter_after_heading: MapSet.put(state.missing_delimiter_after_heading, state.current_heading)
+        }
+
+      true ->
+        %{state | current_lines: state.current_lines ++ [line]}
     end
   end
 
-  defp capture_heading_section(doc, heading, headings) do
-    with {heading_idx, _} <- :binary.match(doc, heading),
-         section_start <- heading_idx + byte_size(heading),
-         true <- section_start + 2 <= byte_size(doc),
-         "\n\n" <- binary_part(doc, section_start, 2) do
-      extract_section_content(doc, section_start + 2, heading, headings)
-    else
-      :nomatch -> nil
-      false -> ""
-      _ -> nil
-    end
+  defp start_section(state, heading) do
+    %{
+      state
+      | current_heading: heading,
+        current_lines: [],
+        order: state.order ++ [heading],
+        awaiting_blank_line: true
+    }
   end
 
-  defp extract_section_content(doc, content_start, heading, headings) do
-    content = binary_part(doc, content_start, byte_size(doc) - content_start)
+  defp close_current_section(%{current_heading: nil} = state), do: state
 
-    case next_heading_offset(content, heading, headings) do
-      nil -> content
-      offset -> binary_part(content, 0, offset)
-    end
+  defp close_current_section(state) do
+    %{
+      state
+      | sections: Map.put(state.sections, state.current_heading, Enum.join(state.current_lines, "\n")),
+        current_heading: nil,
+        current_lines: [],
+        awaiting_blank_line: false
+    }
   end
 
-  defp next_heading_offset(content, heading, headings) do
-    headings_after(heading, headings)
-    |> Enum.map(fn marker -> :binary.match(content, marker) end)
-    |> Enum.filter(&(&1 != :nomatch))
-    |> Enum.map(fn {idx, _} -> idx end)
-    |> case do
-      [] -> nil
-      indexes -> Enum.min(indexes)
-    end
+  defp finalize_parse_state(state) do
+    state
+    |> close_current_section()
+    |> Map.take([:order, :sections, :missing_delimiter_after_heading])
   end
 
-  defp headings_after(current_heading, headings) do
-    headings
-    |> Enum.filter(&(&1 != current_heading))
-    |> Enum.map(&("\n" <> &1))
+  defp normalize_newlines(doc) do
+    doc
+    |> String.replace("\r\n", "\n")
+    |> String.replace("\r", "\n")
+  end
+
+  defp heading_present?(body, heading) do
+    Regex.match?(~r/(?:\A|\n)#{Regex.escape(heading)}(?:\n|\z)/, body)
   end
 end

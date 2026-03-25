@@ -3,6 +3,7 @@ defmodule SymphonyElixir.Workflow do
   Loads workflow configuration and prompt from WORKFLOW.md.
   """
 
+  alias SymphonyElixir.Dotenv
   alias SymphonyElixir.WorkflowStore
 
   @workflow_file_name "WORKFLOW.md"
@@ -16,6 +17,7 @@ defmodule SymphonyElixir.Workflow do
   @spec set_workflow_file_path(Path.t()) :: :ok
   def set_workflow_file_path(path) when is_binary(path) do
     Application.put_env(:symphony_elixir, :workflow_file_path, path)
+    :ok = Dotenv.load_for_workflow_path(path)
     maybe_reload_store()
     :ok
   end
@@ -23,6 +25,7 @@ defmodule SymphonyElixir.Workflow do
   @spec clear_workflow_file_path() :: :ok
   def clear_workflow_file_path do
     Application.delete_env(:symphony_elixir, :workflow_file_path)
+    :ok = Dotenv.load_for_workflow_path(workflow_file_path())
     maybe_reload_store()
     :ok
   end
@@ -51,6 +54,8 @@ defmodule SymphonyElixir.Workflow do
 
   @spec load(Path.t()) :: {:ok, loaded_workflow()} | {:error, term()}
   def load(path) when is_binary(path) do
+    :ok = Dotenv.load_for_workflow_path(path)
+
     case File.read(path) do
       {:ok, content} ->
         parse(content)

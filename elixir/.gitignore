@@ -19,6 +19,7 @@
 # Local runtime logs.
 /log/
 /logs/
+/*.log
 
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump
@@ -41,6 +42,8 @@ erl_crash.dump
 # Local environment and auth artifacts.
 .env
 .env.*
+.env.compose
+docker-compose.env
 .secrets
 .credentials
 status.txt

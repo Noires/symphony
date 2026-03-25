@@ -22,6 +22,57 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert description =~ "Linear"
   end
 
+  test "tool_specs advertises the trello_api input contract when tracker.kind=trello" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_endpoint: "https://api.trello.com/1",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: "trello-token",
+      tracker_board_id: "board-1",
+      tracker_project_slug: nil
+    )
+
+    assert [
+             %{
+               "description" => description,
+               "inputSchema" => %{
+                 "properties" => %{
+                   "body" => _,
+                   "method" => _,
+                   "path" => _,
+                   "query" => _
+                 },
+                 "required" => ["method", "path"],
+                 "type" => "object"
+               },
+               "name" => "trello_api"
+             }
+           ] = DynamicTool.tool_specs()
+
+    assert description =~ "Trello"
+  end
+
+  test "tool_specs advertises GitHub GraphQL and REST contracts when tracker.kind=github" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_endpoint: "https://api.github.com",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_project_slug: nil,
+      tracker_board_id: nil,
+      tracker_owner: "octo-org",
+      tracker_repo: "symphony",
+      tracker_project_number: "7"
+    )
+
+    specs = DynamicTool.tool_specs()
+
+    assert Enum.any?(specs, &(&1["name"] == "github_graphql"))
+    assert Enum.any?(specs, &(&1["name"] == "github_api"))
+    assert Enum.find(specs, &(&1["name"] == "github_graphql"))["description"] =~ "GitHub"
+    assert Enum.find(specs, &(&1["name"] == "github_api"))["description"] =~ "GitHub"
+  end
+
   test "unsupported tools return a failure payload with the supported tool list" do
     response = DynamicTool.execute("not_a_real_tool", %{})
 
@@ -306,5 +357,238 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     assert response["success"] == true
     assert response["output"] == ":ok"
+  end
+
+  test "trello_api returns successful REST responses as tool text" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_endpoint: "https://api.trello.com/1",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: "trello-token",
+      tracker_board_id: "board-1",
+      tracker_project_slug: nil
+    )
+
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "trello_api",
+        %{
+          "method" => "get",
+          "path" => "/cards/card-1",
+          "query" => %{"fields" => "id,name"}
+        },
+        trello_client: fn method, path, query, body, opts ->
+          send(test_pid, {:trello_client_called, method, path, query, body, opts})
+          {:ok, %{"id" => "card-1", "name" => "Build adapter"}}
+        end
+      )
+
+    assert_received {:trello_client_called, "GET", "/cards/card-1", %{"fields" => "id,name"}, nil, []}
+    assert response["success"] == true
+    assert Jason.decode!(response["output"]) == %{"id" => "card-1", "name" => "Build adapter"}
+  end
+
+  test "trello_api validates required arguments before calling Trello" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_endpoint: "https://api.trello.com/1",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: "trello-token",
+      tracker_board_id: "board-1",
+      tracker_project_slug: nil
+    )
+
+    missing_method =
+      DynamicTool.execute(
+        "trello_api",
+        %{"path" => "/cards/card-1"},
+        trello_client: fn _method, _path, _query, _body, _opts ->
+          flunk("trello client should not be called when arguments are invalid")
+        end
+      )
+
+    assert Jason.decode!(missing_method["output"]) == %{
+             "error" => %{
+               "message" => "`trello_api` requires a non-empty `method` string."
+             }
+           }
+
+    invalid_query =
+      DynamicTool.execute(
+        "trello_api",
+        %{"method" => "GET", "path" => "/cards/card-1", "query" => ["bad"]},
+        trello_client: fn _method, _path, _query, _body, _opts ->
+          flunk("trello client should not be called when query is invalid")
+        end
+      )
+
+    assert Jason.decode!(invalid_query["output"]) == %{
+             "error" => %{
+               "message" => "`trello_api.query` must be a JSON object when provided."
+             }
+           }
+  end
+
+  test "trello_api formats transport and auth failures" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_endpoint: "https://api.trello.com/1",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: "trello-token",
+      tracker_board_id: "board-1",
+      tracker_project_slug: nil
+    )
+
+    missing_key =
+      DynamicTool.execute(
+        "trello_api",
+        %{"method" => "GET", "path" => "/cards/card-1"},
+        trello_client: fn _method, _path, _query, _body, _opts -> {:error, :missing_trello_api_key} end
+      )
+
+    assert Jason.decode!(missing_key["output"]) == %{
+             "error" => %{
+               "message" => "Symphony is missing Trello auth. Set `tracker.api_key` in `WORKFLOW.md` or export `TRELLO_API_KEY`."
+             }
+           }
+
+    status_error =
+      DynamicTool.execute(
+        "trello_api",
+        %{"method" => "GET", "path" => "/cards/card-1"},
+        trello_client: fn _method, _path, _query, _body, _opts ->
+          {:error, {:trello_api_status, 429}}
+        end
+      )
+
+    assert Jason.decode!(status_error["output"]) == %{
+             "error" => %{
+               "message" => "Trello API request failed with HTTP 429.",
+               "status" => 429
+             }
+           }
+  end
+
+  test "github_graphql returns successful GraphQL responses as tool text" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_endpoint: "https://api.github.com",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_project_slug: nil,
+      tracker_board_id: nil,
+      tracker_owner: "octo-org",
+      tracker_repo: "symphony",
+      tracker_project_number: "7"
+    )
+
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "github_graphql",
+        %{"query" => "query Viewer { viewer { login } }"},
+        github_graphql_client: fn query, variables, opts ->
+          send(test_pid, {:github_graphql_called, query, variables, opts})
+          {:ok, %{"data" => %{"viewer" => %{"login" => "octocat"}}}}
+        end
+      )
+
+    assert_received {:github_graphql_called, "query Viewer { viewer { login } }", %{}, []}
+    assert response["success"] == true
+    assert Jason.decode!(response["output"]) == %{"data" => %{"viewer" => %{"login" => "octocat"}}}
+  end
+
+  test "github_api returns successful REST responses as tool text" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_endpoint: "https://api.github.com",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_project_slug: nil,
+      tracker_board_id: nil,
+      tracker_owner: "octo-org",
+      tracker_repo: "symphony",
+      tracker_project_number: "7"
+    )
+
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "github_api",
+        %{
+          "method" => "patch",
+          "path" => "/repos/octo-org/symphony/issues/7",
+          "body" => %{"title" => "Updated title"}
+        },
+        github_client: fn method, path, query, body, opts ->
+          send(test_pid, {:github_api_called, method, path, query, body, opts})
+          {:ok, %{"number" => 7, "title" => "Updated title"}}
+        end
+      )
+
+    assert_received {:github_api_called, "PATCH", "/repos/octo-org/symphony/issues/7", %{}, %{"title" => "Updated title"}, []}
+    assert response["success"] == true
+    assert Jason.decode!(response["output"]) == %{"number" => 7, "title" => "Updated title"}
+  end
+
+  test "github tools validate arguments and format auth failures" do
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "github",
+      tracker_endpoint: "https://api.github.com",
+      tracker_api_key: nil,
+      tracker_api_access_token: "github-token",
+      tracker_project_slug: nil,
+      tracker_board_id: nil,
+      tracker_owner: "octo-org",
+      tracker_repo: "symphony",
+      tracker_project_number: "7"
+    )
+
+    missing_query =
+      DynamicTool.execute(
+        "github_graphql",
+        %{"variables" => %{"id" => "PVTI_1"}},
+        github_graphql_client: fn _query, _variables, _opts ->
+          flunk("github graphql client should not be called when the query is missing")
+        end
+      )
+
+    assert Jason.decode!(missing_query["output"]) == %{
+             "error" => %{
+               "message" => "`github_graphql` requires a non-empty `query` string."
+             }
+           }
+
+    invalid_query =
+      DynamicTool.execute(
+        "github_api",
+        %{"method" => "GET", "path" => "/repos/octo-org/symphony/issues/7", "query" => ["bad"]},
+        github_client: fn _method, _path, _query, _body, _opts ->
+          flunk("github client should not be called when query is invalid")
+        end
+      )
+
+    assert Jason.decode!(invalid_query["output"]) == %{
+             "error" => %{
+               "message" => "`github_api.query` must be a JSON object when provided."
+             }
+           }
+
+    missing_token =
+      DynamicTool.execute(
+        "github_api",
+        %{"method" => "GET", "path" => "/repos/octo-org/symphony/issues/7"},
+        github_client: fn _method, _path, _query, _body, _opts -> {:error, :missing_github_api_token} end
+      )
+
+    assert Jason.decode!(missing_token["output"]) == %{
+             "error" => %{
+               "message" => "Symphony is missing GitHub auth. Set `tracker.api_token` in `WORKFLOW.md` or export `GITHUB_TOKEN`."
+             }
+           }
   end
 end

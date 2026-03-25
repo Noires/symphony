@@ -1,0 +1,43 @@
+services:
+  symphony:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - ./.env
+    ports:
+      - "${SYMPHONY_DASHBOARD_PORT:-4000}:4000"
+    environment:
+      SYMPHONY_WORKFLOW_FILE: ${SYMPHONY_WORKFLOW_FILE:-./WORKFLOW.trello.docker.md}
+      SYMPHONY_SOURCE_REPO_URL: ${SYMPHONY_SOURCE_REPO_URL:-https://github.com/Noires/light-archives.git}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_OWNER: ${GITHUB_OWNER:-}
+      GITHUB_REPO: ${GITHUB_REPO:-}
+      GITHUB_PROJECT_NUMBER: ${GITHUB_PROJECT_NUMBER:-}
+      SYMPHONY_OPERATOR_TOKEN: ${SYMPHONY_OPERATOR_TOKEN:-}
+      GIT_AUTHOR_NAME: ${GIT_AUTHOR_NAME:-Symphony}
+      GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-symphony@local.invalid}
+      GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-Symphony}
+      GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-symphony@local.invalid}
+    volumes:
+      - ${SYMPHONY_WORKFLOW_FILE:-./WORKFLOW.trello.docker.md}:/run/symphony/WORKFLOW.md:ro
+      - symphony_workspaces:/workspaces
+      - symphony_logs:/logs
+      - symphony_codex_home:/root/.codex
+    working_dir: /app
+    restart: unless-stopped
+    command:
+      [
+        "./bin/symphony",
+        "--i-understand-that-this-will-be-running-without-the-usual-guardrails",
+        "--logs-root",
+        "/logs",
+        "--port",
+      "4000",
+      "/run/symphony/WORKFLOW.md"
+      ]
+
+volumes:
+  symphony_codex_home:
+  symphony_workspaces:
+  symphony_logs:

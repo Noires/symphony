@@ -1,10 +1,20 @@
 defmodule SymphonyElixir.SSH do
   @moduledoc false
 
+  alias SymphonyElixir.Shell
+
   @spec run(String.t(), String.t(), keyword()) :: {:ok, {String.t(), non_neg_integer()}} | {:error, term()}
   def run(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
-      {:ok, System.cmd(executable, ssh_args(host, command), opts)}
+      args = ssh_args(host, command)
+
+      case windows_script_or_cmd_invocation(executable, args) do
+        {:ok, invocation_executable, invocation_args} ->
+          {:ok, System.cmd(invocation_executable, invocation_args, opts)}
+
+        :error ->
+          {:ok, System.cmd(executable, args, opts)}
+      end
     end
   end
 
@@ -12,17 +22,37 @@ defmodule SymphonyElixir.SSH do
   def start_port(host, command, opts \\ []) when is_binary(host) and is_binary(command) do
     with {:ok, executable} <- ssh_executable() do
       line_bytes = Keyword.get(opts, :line)
+      args = ssh_args(host, command)
 
       port_opts =
-        [
-          :binary,
-          :exit_status,
-          :stderr_to_stdout,
-          args: Enum.map(ssh_args(host, command), &String.to_charlist/1)
-        ]
-        |> maybe_put_line_option(line_bytes)
+        case windows_script_or_cmd_invocation(executable, args) do
+          {:ok, invocation_executable, invocation_args} ->
+            {
+              invocation_executable,
+              [
+                :binary,
+                :exit_status,
+                :stderr_to_stdout,
+                args: Enum.map(invocation_args, &String.to_charlist/1)
+              ]
+            }
 
-      {:ok, Port.open({:spawn_executable, String.to_charlist(executable)}, port_opts)}
+          :error ->
+            {
+              executable,
+              [
+                :binary,
+                :exit_status,
+                :stderr_to_stdout,
+                args: Enum.map(args, &String.to_charlist/1)
+              ]
+            }
+        end
+
+      {spawn_executable, port_opts} = port_opts
+      port_opts = maybe_put_line_option(port_opts, line_bytes)
+
+      {:ok, Port.open({:spawn_executable, String.to_charlist(spawn_executable)}, port_opts)}
     end
   end
 
@@ -96,5 +126,31 @@ defmodule SymphonyElixir.SSH do
 
   defp shell_escape(value) when is_binary(value) do
     "'" <> String.replace(value, "'", "'\"'\"'") <> "'"
+  end
+
+  defp windows_script_or_cmd_invocation(executable, args) when is_binary(executable) and is_list(args) do
+    if match?({:win32, _}, :os.type()) and String.downcase(Path.extname(executable)) in [".cmd", ".bat"] do
+      script_path = Path.rootname(executable)
+
+      cond do
+        File.exists?(script_path) ->
+          sh_path = Shell.find_local_posix_shell(:sh) || raise "sh not found"
+          {:ok, sh_path, [script_path | args]}
+
+        true ->
+          {:ok, System.find_executable("cmd") || "cmd.exe", ["/d", "/s", "/c", cmd_command_line(executable, args)]}
+      end
+    else
+      :error
+    end
+  end
+
+  defp cmd_command_line(executable, args) do
+    [executable | Enum.map(args, &cmd_escape/1)]
+    |> Enum.join(" ")
+  end
+
+  defp cmd_escape(value) when is_binary(value) do
+    "\"" <> String.replace(value, "\"", "\"\"") <> "\""
   end
 end
