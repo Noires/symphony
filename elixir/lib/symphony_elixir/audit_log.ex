@@ -115,6 +115,8 @@ defmodule SymphonyElixir.AuditLog do
   def record_runtime_info(running_entry, runtime_info) when is_map(runtime_info) do
     if audit_enabled?() do
       with {:ok, context} <- run_context_from_entry(running_entry) do
+        recorded_at = Map.get(runtime_info, :recorded_at) || Map.get(runtime_info, "recorded_at") || DateTime.utc_now()
+
         summary_updates =
           %{
             "worker_host" => runtime_value(runtime_info[:worker_host]),
@@ -129,7 +131,7 @@ defmodule SymphonyElixir.AuditLog do
             %{
               "kind" => "worker_runtime",
               "event" => "runtime_updated",
-              "recorded_at" => iso8601(DateTime.utc_now()),
+              "recorded_at" => iso8601(recorded_at),
               "summary" => runtime_update_summary(summary_updates),
               "details" => sanitize_value(summary_updates)
             }
@@ -195,6 +197,8 @@ defmodule SymphonyElixir.AuditLog do
   def record_workspace_metadata(running_entry, metadata) when is_map(running_entry) and is_map(metadata) do
     if audit_enabled?() do
       with {:ok, context} <- run_context_from_entry(running_entry) do
+        recorded_at = Map.get(metadata, :recorded_at) || Map.get(metadata, "recorded_at") || DateTime.utc_now()
+        metadata = Map.drop(metadata, [:recorded_at, "recorded_at"])
         sanitized_metadata = sanitize_value(metadata)
 
         summary_updates =
@@ -206,7 +210,7 @@ defmodule SymphonyElixir.AuditLog do
         event = %{
           "kind" => "workspace",
           "event" => "workspace_metadata_captured",
-          "recorded_at" => iso8601(DateTime.utc_now()),
+          "recorded_at" => iso8601(recorded_at),
           "summary" => workspace_metadata_summary(metadata),
           "details" => sanitized_metadata
         }

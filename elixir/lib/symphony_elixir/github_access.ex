@@ -537,7 +537,7 @@ defmodule SymphonyElixir.GitHubAccess do
   end
 
   defp history_entry_id do
-    "#{DateTime.utc_now() |> DateTime.to_unix(:millisecond)}-#{System.unique_integer([:positive])}"
+    "#{current_time() |> DateTime.to_unix(:millisecond)}-#{System.unique_integer([:positive])}"
   end
 
   defp read_json_file(path) when is_binary(path) do
@@ -580,8 +580,24 @@ defmodule SymphonyElixir.GitHubAccess do
   defp blank_to_nil(_value), do: nil
 
   defp now_iso8601 do
-    DateTime.utc_now()
+    current_time()
     |> DateTime.truncate(:second)
     |> DateTime.to_iso8601()
+  end
+
+  defp current_time do
+    case Application.get_env(:symphony_elixir, :ui_visual_now) do
+      %DateTime{} = datetime ->
+        datetime
+
+      value when is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, datetime, _offset} -> datetime
+          _ -> DateTime.utc_now()
+        end
+
+      _ ->
+        DateTime.utc_now()
+    end
   end
 end

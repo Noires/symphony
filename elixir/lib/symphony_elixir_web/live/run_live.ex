@@ -6,7 +6,7 @@ defmodule SymphonyElixirWeb.RunLive do
   use Phoenix.LiveView, layout: {SymphonyElixirWeb.Layouts, :app}
 
   alias SymphonyElixir.{Config, Orchestrator}
-  alias SymphonyElixirWeb.{Endpoint, Presenter}
+  alias SymphonyElixirWeb.{DashboardComponents, Endpoint, Presenter}
 
   @impl true
   def mount(params, _session, socket) do
@@ -167,87 +167,111 @@ defmodule SymphonyElixirWeb.RunLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <section class="dashboard-shell">
+    <section class="app-shell">
+      <DashboardComponents.app_header
+        page={%{title: "Run Detail"}}
+        operator_authenticated={@operator_authenticated}
+        operator_token_configured={operator_token_configured?()}
+        nav_items={run_navigation_items()}
+        utility_items={run_utility_items(@payload)}
+      />
+
+      <section class="dashboard-shell">
       <%= if @payload[:error] do %>
-        <section class="error-card">
-          <h2 class="error-title">Run unavailable</h2>
-          <p class="error-copy">
-            <strong><%= @payload.error.code %>:</strong> <%= @payload.error.message %>
-          </p>
-          <p class="error-copy">
-            <a class="issue-link" href="/">Back to dashboard</a>
-          </p>
-        </section>
+          <DashboardComponents.page_header
+            eyebrow="Persisted audit run"
+            title="Run unavailable"
+            copy={"#{@payload.error.code}: #{@payload.error.message}"}
+            status_label="Unavailable"
+            status_class="state-badge state-badge-danger"
+          >
+            <:actions>
+              <a class="secondary-button" href="/runs">Back to runs</a>
+              <a class="secondary-button" href="/">Dashboard</a>
+            </:actions>
+          </DashboardComponents.page_header>
+
+          <DashboardComponents.section_frame
+            kicker="Recovery"
+            title="Snapshot unavailable"
+            copy="The persisted run or its surrounding issue context could not be loaded."
+          >
+            <DashboardComponents.empty_state
+              title="Run detail is unavailable"
+              copy="Try again after the audit store refreshes, or return to the run explorer."
+              action_label="Open runs"
+              action_href="/runs"
+            />
+          </DashboardComponents.section_frame>
       <% else %>
         <% run = @payload.run %>
-        <header class="hero-card">
-          <div class="hero-grid">
-            <div>
-              <p class="eyebrow">Persisted audit run</p>
-              <h1 class="hero-title"><%= @payload.issue_identifier %> / <%= run["run_id"] %></h1>
-              <p class="hero-copy">
-                Status <strong><%= run["status"] || "completed" %></strong>,
-                started <span class="mono"><%= run["started_at"] || "n/a" %></span>,
-                ended <span class="mono"><%= run["ended_at"] || "n/a" %></span>.
-              </p>
-            </div>
+        <DashboardComponents.page_header
+          eyebrow="Persisted audit run"
+          title={"#{@payload.issue_identifier} / #{run["run_id"]}"}
+          copy={"Started #{run["started_at"] || "n/a"} and ended #{run["ended_at"] || "n/a"}."}
+          status_label={run["status"] || "completed"}
+          status_class={state_badge_class(run["status"] || "completed")}
+        >
+          <:meta>
+            <DashboardComponents.key_value_list
+              items={[
+                %{label: "Started", value: run["started_at"] || "n/a"},
+                %{label: "Ended", value: run["ended_at"] || "n/a"},
+                %{label: "Storage", value: @payload.storage_backend || "n/a"},
+                %{label: "Efficiency", value: efficiency_label(run)}
+              ]}
+            />
+          </:meta>
+          <:actions>
+            <a class="secondary-button" href="/runs">Back to runs</a>
+            <a class="secondary-button" href={@payload.urls.run_json}>Run JSON</a>
+            <a class="secondary-button" href={@payload.urls.export_bundle}>Audit bundle</a>
+          </:actions>
+        </DashboardComponents.page_header>
 
-            <div class="status-stack">
-              <span class={state_badge_class(run["status"] || "completed")}>
-                <%= run["status"] || "completed" %>
-              </span>
-              <div class="detail-stack">
-                <a class="issue-link" href={@payload.urls.dashboard}>Dashboard</a>
-                <a class="issue-link" href={@payload.urls.issue_json}>Issue JSON</a>
-                <a class="issue-link" href={@payload.urls.run_json}>Run JSON</a>
-                <a class="issue-link" href={@payload.urls.export_bundle}>Audit bundle</a>
+        <DashboardComponents.metric_strip items={run_metric_items(@payload)} />
+
+        <DashboardComponents.section_frame
+          kicker="Operator control"
+          title="Guardrails"
+          copy="Approve blocked actions and control full access directly from this run view."
+        >
+          <section class="split-grid-tight">
+            <form phx-change="update_operator_token" class="stack-sm">
+              <div class="field-group">
+                <label class="field-label" for="run-operator-token">Operator token</label>
+                <input
+                  id="run-operator-token"
+                  type="password"
+                  name="operator_token"
+                  value={@operator_token}
+                  autocomplete="current-password"
+                  class="field-input"
+                />
               </div>
-            </div>
-          </div>
-        </header>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <p class="section-kicker">Operator control</p>
-              <h2 class="section-title">Guardrails</h2>
-              <p class="section-copy">Approve blocked actions and control full access directly from this run view.</p>
-            </div>
-          </div>
-
-          <div class="detail-stack">
-            <form phx-change="update_operator_token" class="detail-stack">
-              <label class="muted" for="run-operator-token">Operator token</label>
-              <input
-                id="run-operator-token"
-                type="password"
-                name="operator_token"
-                value={@operator_token}
-                placeholder="Enter operator token"
-                class="code-panel"
-                style="max-width: 24rem;"
-              />
             </form>
 
-            <span class={if @operator_authenticated, do: "state-badge state-badge-active", else: "state-badge state-badge-warning"}>
-              <%= if @operator_authenticated, do: "operator authenticated", else: "operator token required" %>
-            </span>
-          </div>
-        </section>
+            <DashboardComponents.key_value_list
+              items={[
+                %{label: "Status", value: if(@operator_authenticated, do: "authenticated", else: "token required")},
+                %{label: "Configured", value: if(operator_token_configured?(), do: "yes", else: "no")},
+                %{label: "Storage", value: "LiveView session state only"}
+              ]}
+            />
+          </section>
+        </DashboardComponents.section_frame>
 
         <%= if @payload.active_overrides != [] do %>
-          <section class="section-card" style="border-color: rgba(255, 122, 69, 0.7); box-shadow: 0 18px 48px rgba(255, 122, 69, 0.12);">
-            <div class="section-header">
-              <div>
-                <p class="section-kicker">Warning</p>
-                <h2 class="section-title">Full access is active for this run context</h2>
-                <p class="section-copy">Network and full-access sandboxing are currently enabled via an operator override.</p>
-              </div>
-              <div class="section-meta">
-                <span class="state-badge state-badge-danger"><%= length(@payload.active_overrides) %> override(s)</span>
-              </div>
+          <DashboardComponents.section_frame
+            kicker="Warning"
+            title="Full access is active for this run context"
+            copy="Network and full-access sandboxing are currently enabled via an operator override."
+            class="attention-card attention-card-alert"
+          >
+            <div class="button-row">
+              <span class="state-badge state-badge-danger"><%= length(@payload.active_overrides) %> override(s)</span>
             </div>
-          </section>
+          </DashboardComponents.section_frame>
         <% end %>
 
         <%= if @payload.live_issue do %>
@@ -718,6 +742,7 @@ defmodule SymphonyElixirWeb.RunLive do
           <% end %>
         </section>
       <% end %>
+      </section>
     </section>
     """
   end
@@ -750,6 +775,39 @@ defmodule SymphonyElixirWeb.RunLive do
   end
 
   defp run_path(issue_identifier, run_id), do: "/runs/#{issue_identifier}/#{run_id}"
+
+  defp run_navigation_items do
+    [
+      %{label: "Overview", href: "/", current: false},
+      %{label: "Approvals", href: "/approvals", current: false},
+      %{label: "Settings", href: "/settings", current: false},
+      %{label: "Runs", href: "/runs", current: true}
+    ]
+  end
+
+  defp run_utility_items(%{urls: urls}) when is_map(urls) do
+    [
+      %{label: "Dashboard", href: Map.get(urls, :dashboard) || "/"},
+      %{label: "Issue JSON", href: Map.get(urls, :issue_json) || "/runs"},
+      %{label: "Run JSON", href: Map.get(urls, :run_json) || "/runs"},
+      %{label: "Audit bundle", href: Map.get(urls, :export_bundle) || "/runs"}
+    ]
+  end
+
+  defp run_utility_items(_payload), do: [%{label: "Dashboard", href: "/"}, %{label: "Runs", href: "/runs"}]
+
+  defp run_metric_items(%{run: run, storage_backend: storage_backend}) when is_map(run) do
+    [
+      %{label: "Runtime", value: format_duration_ms(run["duration_ms"]), value_class: "numeric", detail: "Codex execution time"},
+      %{label: "Queue wait", value: format_duration_ms(get_in(run, ["timing", "queue_wait_ms"])), value_class: "numeric", detail: "Eligibility to dispatch"},
+      %{label: "Human wait", value: format_duration_ms(get_in(run, ["timing", "blocked_for_human_ms"])), value_class: "numeric", detail: "Blocked on human follow-up"},
+      %{label: "Tokens", value: format_int(get_in(run, ["tokens", "total_tokens"]) || 0), value_class: "numeric", detail: efficiency_flags_label(run)},
+      %{label: "Storage", value: storage_backend || "n/a", detail: run_changed_files_label(run)}
+    ]
+  end
+
+  defp run_metric_items(_payload), do: []
+  defp operator_token_configured?, do: is_binary(configured_operator_token())
 
   defp format_duration_ms(duration_ms) when is_integer(duration_ms) and duration_ms >= 0 do
     total_seconds = div(duration_ms, 1_000)

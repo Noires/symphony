@@ -19,7 +19,10 @@
 # Local runtime logs.
 /log/
 /logs/
+/node_modules/
 /*.log
+/playwright-report/
+/test-results/
 
 # If the VM crashes, it generates a dump, let's ignore it too.
 erl_crash.dump

@@ -144,7 +144,7 @@ defmodule SymphonyElixir.SettingsOverlay do
 
       {:ok,
        %{
-         generated_at: DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+         generated_at: now_iso8601(),
          overlay: overlay_payload(overlay_doc),
          settings:
            describe_fields(
@@ -464,7 +464,7 @@ defmodule SymphonyElixir.SettingsOverlay do
   defp editable_value(_definition, value), do: to_string(value)
 
   defp updated_overlay_doc(previous_doc, changes, opts) do
-    now = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    now = now_iso8601()
 
     %{
       "version" => Map.get(previous_doc, "version", @overlay_version),
@@ -491,7 +491,7 @@ defmodule SymphonyElixir.SettingsOverlay do
     entry = %{
       "id" => history_entry_id(),
       "action" => action,
-      "recorded_at" => DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601(),
+      "recorded_at" => now_iso8601(),
       "actor" => Keyword.get(opts, :actor, "system"),
       "reason" => Keyword.get(opts, :reason),
       "paths" => normalized_paths,
@@ -614,7 +614,29 @@ defmodule SymphonyElixir.SettingsOverlay do
   end
 
   defp history_entry_id do
-    "#{DateTime.utc_now() |> DateTime.to_unix(:millisecond)}-#{System.unique_integer([:positive])}"
+    "#{current_time() |> DateTime.to_unix(:millisecond)}-#{System.unique_integer([:positive])}"
+  end
+
+  defp now_iso8601 do
+    current_time()
+    |> DateTime.truncate(:second)
+    |> DateTime.to_iso8601()
+  end
+
+  defp current_time do
+    case Application.get_env(:symphony_elixir, :ui_visual_now) do
+      %DateTime{} = datetime ->
+        datetime
+
+      value when is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, datetime, _offset} -> datetime
+          _ -> DateTime.utc_now()
+        end
+
+      _ ->
+        DateTime.utc_now()
+    end
   end
 
   defp values_for_paths(changes, paths) when is_map(changes) and is_list(paths) do

@@ -1,0 +1,13 @@
+{
+  "name": "symphony-elixir-ui-visual",
+  "private": true,
+  "scripts": {
+    "install:ui-browsers": "playwright install chromium",
+    "test:ui-visual": "playwright test",
+    "test:ui-visual:headed": "playwright test --headed",
+    "test:ui-visual:update": "playwright test --update-snapshots"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.58.2"
+  }
+}

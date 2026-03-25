@@ -8,7 +8,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
-    generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
+    generated_at = current_time() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
@@ -383,7 +383,7 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(pending_approval, :worker_host),
       workspace_path: Map.get(pending_approval, :workspace_path),
       session_id: pending_approval.session_id,
-      state: pending_approval.state,
+      state: Map.get(pending_approval, :issue_state) || Map.get(pending_approval, :state),
       status: pending_approval.status,
       requested_at: pending_approval.requested_at,
       action_type: pending_approval.action_type,
@@ -397,10 +397,14 @@ defmodule SymphonyElixirWeb.Presenter do
       decision_options: pending_approval.decision_options,
       details: pending_approval.details,
       payload: Map.get(pending_approval, :payload),
-      review_tags: get_in(pending_approval, [:details, "review_tags"]) || []
+      review_tags: Map.get(pending_approval.details || %{}, "review_tags") || []
     }
+    explanation =
+      Map.get(pending_approval, :explanation) ||
+        Map.get(pending_approval, "explanation") ||
+        pending_approval_explanation(base, active_guardrail_rules, guardrail_overrides)
 
-    Map.put(base, :explanation, pending_approval_explanation(base, active_guardrail_rules, guardrail_overrides))
+    Map.put(base, :explanation, explanation)
   end
 
   defp retry_issue_payload(retry) do
@@ -552,7 +556,7 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp due_at_iso8601(due_in_ms) when is_integer(due_in_ms) do
-    DateTime.utc_now()
+    current_time()
     |> DateTime.add(div(due_in_ms, 1_000), :second)
     |> DateTime.truncate(:second)
     |> DateTime.to_iso8601()
@@ -674,13 +678,29 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp guardrail_rule_lifecycle(%Rule{} = rule) do
-    now = DateTime.utc_now()
+    now = current_time()
 
     cond do
       Rule.active?(rule) -> "active"
       match?(%DateTime{}, rule.expires_at) and DateTime.compare(rule.expires_at, now) != :gt -> "expired"
       rule.enabled == false -> "disabled"
       true -> "inactive"
+    end
+  end
+
+  defp current_time do
+    case Application.get_env(:symphony_elixir, :ui_visual_now) do
+      %DateTime{} = value ->
+        value
+
+      value when is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, parsed, _offset} -> parsed
+          _ -> DateTime.utc_now()
+        end
+
+      _ ->
+        DateTime.utc_now()
     end
   end
 end

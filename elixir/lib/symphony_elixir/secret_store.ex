@@ -243,8 +243,24 @@ defmodule SymphonyElixir.SecretStore do
   end
 
   defp now_iso8601 do
-    DateTime.utc_now()
+    current_time()
     |> DateTime.truncate(:second)
     |> DateTime.to_iso8601()
+  end
+
+  defp current_time do
+    case Application.get_env(:symphony_elixir, :ui_visual_now) do
+      %DateTime{} = datetime ->
+        datetime
+
+      value when is_binary(value) ->
+        case DateTime.from_iso8601(value) do
+          {:ok, datetime, _offset} -> datetime
+          _ -> DateTime.utc_now()
+        end
+
+      _ ->
+        DateTime.utc_now()
+    end
   end
 end

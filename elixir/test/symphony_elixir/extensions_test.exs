@@ -1343,9 +1343,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
     assert dashboard_css =~ ":root {"
-    assert dashboard_css =~ ".status-badge-live"
-    assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
-    assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
+    assert dashboard_css =~ "html[data-theme=\"light\"]"
+    assert dashboard_css =~ ".skip-link"
+    assert dashboard_css =~ ".app-header"
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -1383,20 +1383,18 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "MT-RETRY"
     assert html =~ "rendered"
     assert html =~ "Runtime"
-    assert html =~ "Live"
-    assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Codex update"
     assert html =~ "Running sessions"
     assert html =~ "Retry queue"
+    assert html =~ "Skip to main content"
+    assert html =~ "State API"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
     refute html =~ "Transport"
     refute html =~ "UI-managed settings"
     refute html =~ "Approval Control"
-    assert html =~ "status-badge-live"
-    assert html =~ "status-badge-offline"
 
     updated_snapshot =
       put_in(snapshot.running, [
@@ -1481,9 +1479,39 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert runs_html =~ "Run Intelligence"
     assert runs_html =~ "Expensive runs"
     assert runs_html =~ "Cheap wins"
-    assert runs_html =~ "Recent completed runs"
+    assert runs_html =~ "Run explorer"
     assert runs_html =~ "Issue efficiency"
     refute runs_html =~ "UI-managed settings"
+  end
+
+  test "dashboard liveview preserves URL-backed filter state and app shell basics" do
+    orchestrator_name = Module.concat(__MODULE__, :DashboardFilterOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    {:ok, _runs_view, runs_html} = live(build_conn(), "/runs?q=MT-HTTP&sort=tokens&view=cheap")
+    assert runs_html =~ "Skip to main content"
+    assert runs_html =~ "name=\"q\""
+    assert runs_html =~ "value=\"MT-HTTP\""
+    assert runs_html =~ ~r/<option[^>]*(selected[^>]*value="tokens"|value="tokens"[^>]*selected)/
+    assert runs_html =~ ~r/<option[^>]*(selected[^>]*value="cheap"|value="cheap"[^>]*selected)/
+
+    {:ok, _approvals_view, approvals_html} = live(build_conn(), "/approvals?q=needle&risk_level=high")
+    assert approvals_html =~ "name=\"q\""
+    assert approvals_html =~ "value=\"needle\""
+    assert approvals_html =~ ~r/<option[^>]*(selected[^>]*value="high"|value="high"[^>]*selected)/
   end
 
   test "dashboard liveview can edit UI-managed runtime settings with operator token" do
