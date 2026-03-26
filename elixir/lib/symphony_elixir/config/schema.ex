@@ -758,7 +758,7 @@ defmodule SymphonyElixir.Config.Schema do
     if token == "" do
       "''"
     else
-      if Regex.match?(~r/^[A-Za-z0-9_@%+=:,./~${}-]+$/, token) do
+      if Regex.match?(~r'^[A-Za-z0-9_@%+=:,./~${}-]+$', token) do
         token
       else
         "'" <> String.replace(token, "'", "'\"'\"'") <> "'"
