@@ -53,6 +53,15 @@ defmodule SymphonyElixir.GitHubAccess do
       default: "symphony@local.invalid",
       apply_mode: "next workspace hook",
       type: :email
+    },
+    "landing_mode" => %{
+      label: "Landing Mode",
+      description: "Whether a Merging run should land directly onto main or create/update a pull request from the issue branch.",
+      env_var: "SYMPHONY_GITHUB_LANDING_MODE",
+      default: "direct_merge",
+      apply_mode: "next workspace hook",
+      type: :enum,
+      options: ["direct_merge", "pull_request"]
     }
   }
 
@@ -196,6 +205,15 @@ defmodule SymphonyElixir.GitHubAccess do
     end
   end
 
+  @spec effective_config_value(String.t()) :: String.t() | nil
+  def effective_config_value(path) when is_binary(path) do
+    if Map.has_key?(@field_definitions, path) do
+      effective_value(path)
+    else
+      nil
+    end
+  end
+
   @spec token_file_path() :: Path.t()
   def token_file_path do
     SecretStore.file_path(@secret_key)
@@ -297,6 +315,24 @@ defmodule SymphonyElixir.GitHubAccess do
     end
   end
 
+  defp cast_value(%{type: :enum, options: options}, raw_value, path) do
+    value =
+      raw_value
+      |> to_string()
+      |> blank_to_nil()
+
+    cond do
+      is_nil(value) ->
+        {:error, {:invalid_github_setting_value, path, "must be one of #{Enum.join(options, ", ")}"}}
+
+      value in options ->
+        {:ok, value}
+
+      true ->
+        {:error, {:invalid_github_setting_value, path, "must be one of #{Enum.join(options, ", ")}"}}
+    end
+  end
+
   defp normalize_token(raw_token) when is_binary(raw_token) do
     case blank_to_nil(String.trim(raw_token)) do
       nil -> {:error, {:invalid_token_value, "must be a non-blank string"}}
@@ -328,6 +364,7 @@ defmodule SymphonyElixir.GitHubAccess do
         label: definition.label,
         description: definition.description,
         type: Atom.to_string(definition.type),
+        options: field_options(definition),
         apply_mode: definition.apply_mode,
         source: source,
         source_label: source_label(source),
@@ -339,6 +376,9 @@ defmodule SymphonyElixir.GitHubAccess do
       }
     end)
   end
+
+  defp field_options(%{type: :enum, options: options}), do: options
+  defp field_options(_definition), do: []
 
   defp source_label("ui_override"), do: "UI override"
   defp source_label("ui_secret"), do: "UI secret"

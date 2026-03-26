@@ -1028,6 +1028,61 @@ defmodule SymphonyElixir.CoreTest do
     assert state.retry_attempts == %{}
   end
 
+  test "normal worker exit returns merging issues to human review when github landing mode is pull_request" do
+    issue = %Issue{id: "issue-pr-review", identifier: "MT-558D", state: "Merging"}
+
+    previous_landing_mode = System.get_env("SYMPHONY_GITHUB_LANDING_MODE")
+    System.put_env("SYMPHONY_GITHUB_LANDING_MODE", "pull_request")
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
+    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "memory",
+      tracker_api_token: nil,
+      tracker_project_slug: nil,
+      continue_on_active_issue: false,
+      completed_issue_state: "Human Review",
+      completed_issue_state_by_state: %{"Merging" => "Done"}
+    )
+
+    issue_id = issue.id
+    ref = make_ref()
+    orchestrator_name = Module.concat(__MODULE__, :PullRequestLandingModeOrchestrator)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+    on_exit(fn ->
+      restore_env("SYMPHONY_GITHUB_LANDING_MODE", previous_landing_mode)
+      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
+      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+
+      if Process.alive?(pid) do
+        Process.exit(pid, :normal)
+      end
+    end)
+
+    initial_state = :sys.get_state(pid)
+
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: "MT-558D",
+      issue: issue,
+      started_at: DateTime.utc_now()
+    }
+
+    :sys.replace_state(pid, fn _ ->
+      initial_state
+      |> Map.put(:running, %{issue_id => running_entry})
+      |> Map.put(:claimed, MapSet.new([issue_id]))
+      |> Map.put(:retry_attempts, %{})
+    end)
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+
+    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
+  end
+
   test "abnormal worker exit increments retry attempt progressively" do
     issue_id = "issue-crash"
     ref = make_ref()

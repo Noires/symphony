@@ -198,6 +198,8 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:command, :string, default: "codex app-server")
+      field(:model, :string)
+      field(:reasoning_effort, :string)
 
       field(:approval_policy, StringOrMap,
         default: %{
@@ -223,6 +225,8 @@ defmodule SymphonyElixir.Config.Schema do
         attrs,
         [
           :command,
+          :model,
+          :reasoning_effort,
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
@@ -571,11 +575,7 @@ defmodule SymphonyElixir.Config.Schema do
       | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
     }
 
-    codex = %{
-      settings.codex
-      | approval_policy: normalize_keys(settings.codex.approval_policy),
-        turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
-    }
+    codex = finalize_codex_settings(settings.codex)
 
     guardrails = %{
       settings.guardrails
@@ -586,6 +586,201 @@ defmodule SymphonyElixir.Config.Schema do
 
     %{settings | tracker: tracker, workspace: workspace, agent: agent, codex: codex, guardrails: guardrails}
   end
+
+  defp finalize_codex_settings(codex) do
+    base_command = resolve_string_setting(codex.command, "codex app-server")
+    parsed_command = parse_codex_command(base_command)
+    model = resolve_string_setting(codex.model, parsed_command.model)
+    reasoning_effort = resolve_string_setting(codex.reasoning_effort, parsed_command.reasoning_effort)
+
+    %{
+      codex
+      | command: build_codex_command(parsed_command, model, reasoning_effort),
+        model: model,
+        reasoning_effort: reasoning_effort,
+        approval_policy: normalize_keys(codex.approval_policy),
+        turn_sandbox_policy: normalize_optional_map(codex.turn_sandbox_policy)
+    }
+  end
+
+  defp parse_codex_command(command) when is_binary(command) do
+    case OptionParser.split(command) do
+      [executable | args] ->
+        {pre_app_server_args, post_app_server_args, app_server?} = split_codex_command_args(args)
+        {clean_pre_args, model, reasoning_effort} = extract_codex_launch_settings(pre_app_server_args, nil, nil, [])
+
+        %{
+          raw_command: command,
+          parsed?: true,
+          executable: executable,
+          pre_app_server_args: clean_pre_args,
+          post_app_server_args: post_app_server_args,
+          app_server?: app_server?,
+          model: model,
+          reasoning_effort: reasoning_effort
+        }
+
+      _ ->
+        %{
+          raw_command: command,
+          parsed?: false,
+          executable: "codex",
+          pre_app_server_args: [],
+          post_app_server_args: [],
+          app_server?: true,
+          model: nil,
+          reasoning_effort: nil
+        }
+    end
+  rescue
+    _ ->
+      %{
+        raw_command: command,
+        parsed?: false,
+        executable: "codex",
+        pre_app_server_args: [],
+        post_app_server_args: [],
+        app_server?: true,
+        model: nil,
+        reasoning_effort: nil
+      }
+  end
+
+  defp split_codex_command_args(args) when is_list(args) do
+    case Enum.find_index(args, &(&1 == "app-server")) do
+      nil ->
+        {args, [], false}
+
+      index ->
+        {Enum.take(args, index), Enum.drop(args, index + 1), true}
+    end
+  end
+
+  defp extract_codex_launch_settings([], model, reasoning_effort, acc) do
+    {Enum.reverse(acc), model, reasoning_effort}
+  end
+
+  defp extract_codex_launch_settings(["--model", value | rest], _model, reasoning_effort, acc) do
+    extract_codex_launch_settings(rest, value, reasoning_effort, acc)
+  end
+
+  defp extract_codex_launch_settings(["-m", value | rest], _model, reasoning_effort, acc) do
+    extract_codex_launch_settings(rest, value, reasoning_effort, acc)
+  end
+
+  defp extract_codex_launch_settings(["--config", value | rest], model, reasoning_effort, acc) do
+    case parse_codex_config_override(value) do
+      {:reasoning_effort, parsed_value} ->
+        extract_codex_launch_settings(rest, model, parsed_value, acc)
+
+      :ignore ->
+        extract_codex_launch_settings(rest, model, reasoning_effort, [value, "--config" | acc])
+    end
+  end
+
+  defp extract_codex_launch_settings(["-c", value | rest], model, reasoning_effort, acc) do
+    case parse_codex_config_override(value) do
+      {:reasoning_effort, parsed_value} ->
+        extract_codex_launch_settings(rest, model, parsed_value, acc)
+
+      :ignore ->
+        extract_codex_launch_settings(rest, model, reasoning_effort, [value, "-c" | acc])
+    end
+  end
+
+  defp extract_codex_launch_settings([arg | rest], model, reasoning_effort, acc)
+       when is_binary(arg) do
+    cond do
+      String.starts_with?(arg, "--model=") ->
+        extract_codex_launch_settings(rest, String.replace_prefix(arg, "--model=", ""), reasoning_effort, acc)
+
+      String.starts_with?(arg, "--config=") ->
+        case parse_codex_config_override(String.replace_prefix(arg, "--config=", "")) do
+          {:reasoning_effort, parsed_value} ->
+            extract_codex_launch_settings(rest, model, parsed_value, acc)
+
+          :ignore ->
+            extract_codex_launch_settings(rest, model, reasoning_effort, [arg | acc])
+        end
+
+      true ->
+        extract_codex_launch_settings(rest, model, reasoning_effort, [arg | acc])
+    end
+  end
+
+  defp parse_codex_config_override(value) when is_binary(value) do
+    case String.split(value, "=", parts: 2) do
+      ["model_reasoning_effort", raw_value] ->
+        {:reasoning_effort, trim_surrounding_quotes(String.trim(raw_value))}
+
+      _ ->
+        :ignore
+    end
+  end
+
+  defp parse_codex_config_override(_value), do: :ignore
+
+  defp build_codex_command(parsed_command, model, reasoning_effort) when is_map(parsed_command) do
+    if Map.get(parsed_command, :parsed?) == false and is_nil(model) and is_nil(reasoning_effort) do
+      Map.get(parsed_command, :raw_command, "codex app-server")
+    else
+      tokens =
+        [parsed_command.executable]
+        |> Kernel.++(Map.get(parsed_command, :pre_app_server_args, []))
+        |> maybe_append_reasoning_effort(reasoning_effort)
+        |> maybe_append_model(model)
+        |> maybe_append_app_server(parsed_command)
+
+      Enum.map_join(tokens, " ", &shell_join_token/1)
+    end
+  end
+
+  defp maybe_append_reasoning_effort(tokens, nil), do: tokens
+  defp maybe_append_reasoning_effort(tokens, ""), do: tokens
+
+  defp maybe_append_reasoning_effort(tokens, reasoning_effort) when is_binary(reasoning_effort) do
+    tokens ++ ["--config", "model_reasoning_effort=#{reasoning_effort}"]
+  end
+
+  defp maybe_append_model(tokens, nil), do: tokens
+  defp maybe_append_model(tokens, ""), do: tokens
+  defp maybe_append_model(tokens, model) when is_binary(model), do: tokens ++ ["--model", model]
+
+  defp maybe_append_app_server(tokens, %{app_server?: true, post_app_server_args: post_args}) do
+    tokens ++ ["app-server"] ++ post_args
+  end
+
+  defp maybe_append_app_server(tokens, %{app_server?: false, post_app_server_args: post_args}) do
+    tokens ++ post_args
+  end
+
+  defp shell_join_token(token) when is_binary(token) do
+    if token == "" do
+      "''"
+    else
+      if Regex.match?(~r/^[A-Za-z0-9_@%+=:,./~${}-]+$/, token) do
+        token
+      else
+        "'" <> String.replace(token, "'", "'\"'\"'") <> "'"
+      end
+    end
+  end
+
+  defp trim_surrounding_quotes("\"" <> rest) do
+    case String.ends_with?(rest, "\"") do
+      true -> String.trim_trailing(rest, "\"")
+      false -> "\"" <> rest
+    end
+  end
+
+  defp trim_surrounding_quotes("'" <> rest) do
+    case String.ends_with?(rest, "'") do
+      true -> String.trim_trailing(rest, "'")
+      false -> "'" <> rest
+    end
+  end
+
+  defp trim_surrounding_quotes(value), do: value
 
   defp finalize_tracker_settings(tracker) do
     kind = normalize_tracker_kind(tracker.kind) || "linear"

@@ -53,6 +53,27 @@ defmodule SymphonyElixir.SettingsOverlay do
       type: :string_map,
       apply_mode: "next dispatch"
     },
+    "codex.command" => %{
+      group: "Codex",
+      label: "Codex Command",
+      description: "Base Codex launch command. Advanced flags stay here; model and reasoning overrides rewrite their matching launch flags.",
+      type: :string,
+      apply_mode: "next dispatch"
+    },
+    "codex.model" => %{
+      group: "Codex",
+      label: "Codex Model",
+      description: "Model passed to Codex with `--model` on the next worker dispatch.",
+      type: :string,
+      apply_mode: "next dispatch"
+    },
+    "codex.reasoning_effort" => %{
+      group: "Codex",
+      label: "Reasoning Effort",
+      description: "Reasoning effort passed via `--config model_reasoning_effort=...` on the next worker dispatch.",
+      type: :string,
+      apply_mode: "next dispatch"
+    },
     "observability.refresh_ms" => %{
       group: "Audit And Dashboard",
       label: "Refresh Interval (ms)",
@@ -436,7 +457,7 @@ defmodule SymphonyElixir.SettingsOverlay do
   end
 
   defp field_options(%{type: :enum, options: options}) do
-    Enum.map(options, &%{value: &1, label: &1})
+    options
   end
 
   defp field_options(_definition), do: []

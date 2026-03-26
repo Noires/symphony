@@ -234,6 +234,9 @@ Notes:
 - For env-backed path values, use `$VAR`. `workspace.root` resolves `$VAR` before path handling,
   while `codex.command` stays a shell command string and any `$VAR` expansion there happens in the
   launched shell.
+- `codex.model` and `codex.reasoning_effort` can be layered on top of `codex.command`. Symphony
+  rewrites the matching `--model` and `--config model_reasoning_effort=...` launch flags while
+  preserving the rest of the command.
 
 ```yaml
 tracker:
@@ -244,7 +247,9 @@ hooks:
   after_create: |
     git clone --depth 1 "$SOURCE_REPO_URL" .
 codex:
-  command: "$CODEX_BIN app-server --model gpt-5.3-codex"
+  command: "$CODEX_BIN --config shell_environment_policy.inherit=all app-server"
+  model: "gpt-5.1-codex-mini"
+  reasoning_effort: "high"
 ```
 
 - If `WORKFLOW.md` is missing or has invalid YAML at startup, Symphony does not boot.

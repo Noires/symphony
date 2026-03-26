@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, AuditLog, Config, Guardrails.Approvals, Guardrails.Overrides, Guardrails.Policy, Guardrails.Rule, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, AuditLog, Config, GitHubAccess, Guardrails.Approvals, Guardrails.Overrides, Guardrails.Policy, Guardrails.Rule, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Issue
 
@@ -1543,12 +1543,19 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp completed_issue_state_for_issue(current_state) when is_binary(current_state) do
     agent = Config.settings!().agent
+    normalized_current_state = Schema.normalize_issue_state(current_state)
 
-    Map.get(
-      agent.completed_issue_state_by_state,
-      Schema.normalize_issue_state(current_state),
-      agent.completed_issue_state
-    )
+    cond do
+      normalized_current_state == "merging" and GitHubAccess.effective_config_value("landing_mode") == "pull_request" ->
+        "Human Review"
+
+      true ->
+        Map.get(
+          agent.completed_issue_state_by_state,
+          normalized_current_state,
+          agent.completed_issue_state
+        )
+    end
   end
 
   defp completed_issue_state_for_issue(_current_state), do: nil

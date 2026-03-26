@@ -793,17 +793,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
         <form phx-submit="update_github_access_setting" class="stack-sm">
           <input type="hidden" name="path" value={@setting.path} />
-          <div class="field-group">
-            <label class="field-label" for={"github-setting-#{@setting.path}"}>Value</label>
-            <input
-              id={"github-setting-#{@setting.path}"}
-              name="value"
-              type={github_setting_input_type(@setting)}
-              value={editable_value_string(@setting)}
-              class="field-input"
-              disabled={!@operator_authenticated}
-            />
-          </div>
+          <.github_setting_input setting={@setting} operator_authenticated={@operator_authenticated} />
           <div class="button-row">
             <button type="submit" class="primary-button" disabled={!@operator_authenticated} phx-disable-with="Applying...">
               Apply
@@ -823,6 +813,43 @@ defmodule SymphonyElixirWeb.DashboardLive do
       </div>
     </DashboardComponents.disclosure_panel>
     """
+  end
+
+  attr(:setting, :map, required: true)
+  attr(:operator_authenticated, :boolean, default: false)
+
+  defp github_setting_input(assigns) do
+    case github_setting_type(assigns.setting) do
+      "enum" ->
+        ~H"""
+        <div class="field-group">
+          <label class="field-label" for={"github-setting-#{@setting.path}"}>Value</label>
+          <select
+            id={"github-setting-#{@setting.path}"}
+            name="value"
+            class="field-select"
+            disabled={!@operator_authenticated}
+          >
+            <option :for={value <- @setting.options || []} value={value} selected={editable_value_string(@setting) == value}><%= value %></option>
+          </select>
+        </div>
+        """
+
+      _ ->
+        ~H"""
+        <div class="field-group">
+          <label class="field-label" for={"github-setting-#{@setting.path}"}>Value</label>
+          <input
+            id={"github-setting-#{@setting.path}"}
+            name="value"
+            type={github_setting_input_type(@setting)}
+            value={editable_value_string(@setting)}
+            class="field-input"
+            disabled={!@operator_authenticated}
+          />
+        </div>
+        """
+    end
   end
 
   defp settings_page(assigns) do
@@ -1802,8 +1829,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp runtime_setting_input(assigns) do
     setting = assigns.setting
 
-    case setting.type do
-      :boolean ->
+    case normalize_setting_type(setting.type) do
+      "boolean" ->
         ~H"""
         <div class="field-group">
           <label class="field-label" for={"runtime-setting-#{@setting.path}"}>Value</label>
@@ -1814,7 +1841,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
         """
 
-      :enum ->
+      "enum" ->
         ~H"""
         <div class="field-group">
           <label class="field-label" for={"runtime-setting-#{@setting.path}"}>Value</label>
@@ -1824,7 +1851,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
         """
 
-      :integer_map ->
+      "integer_map" ->
         ~H"""
         <div class="field-group">
           <label class="field-label" for={"runtime-setting-#{@setting.path}"}>JSON value</label>
@@ -1832,7 +1859,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
         """
 
-      :string_map ->
+      "string_map" ->
         ~H"""
         <div class="field-group">
           <label class="field-label" for={"runtime-setting-#{@setting.path}"}>JSON value</label>
@@ -1840,7 +1867,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         </div>
         """
 
-      :integer ->
+      "integer" ->
         ~H"""
         <div class="field-group">
           <label class="field-label" for={"runtime-setting-#{@setting.path}"}>Value</label>
@@ -2166,7 +2193,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp editable_value_string(%{editable_value: value}) when is_map(value) or is_list(value), do: Jason.encode!(value)
   defp editable_value_string(%{editable_value: nil}), do: ""
   defp editable_value_string(_setting), do: ""
+
+  defp normalize_setting_type(type) when is_atom(type), do: Atom.to_string(type)
+  defp normalize_setting_type(type) when is_binary(type), do: type
+  defp normalize_setting_type(_type), do: ""
+  defp github_setting_type(%{type: type}) when is_atom(type), do: Atom.to_string(type)
+  defp github_setting_type(%{type: type}) when is_binary(type), do: type
+  defp github_setting_type(_setting), do: "string"
   defp github_setting_input_type(%{type: :email}), do: "email"
+  defp github_setting_input_type(%{type: "email"}), do: "email"
   defp github_setting_input_type(_setting), do: "text"
 
   defp require_operator_access(socket) do

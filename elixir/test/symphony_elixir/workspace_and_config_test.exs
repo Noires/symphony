@@ -759,6 +759,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.worker.max_concurrent_agents_per_host == nil
     assert config.agent.max_concurrent_agents == 10
     assert config.codex.command == "codex app-server"
+    assert config.codex.model == nil
+    assert config.codex.reasoning_effort == nil
 
     assert config.codex.approval_policy == %{
              "reject" => %{
@@ -786,8 +788,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
 
-    write_workflow_file!(Workflow.workflow_file_path(), codex_command: "codex app-server --model gpt-5.3-codex")
-    assert Config.settings!().codex.command == "codex app-server --model gpt-5.3-codex"
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      codex_command: "codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.3-codex app-server"
+    )
+
+    config = Config.settings!()
+    assert config.codex.command == "codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=xhigh --model gpt-5.3-codex app-server"
+    assert config.codex.model == "gpt-5.3-codex"
+    assert config.codex.reasoning_effort == "xhigh"
+
+    write_workflow_file!(
+      Workflow.workflow_file_path(),
+      codex_command: "codex --config shell_environment_policy.inherit=all app-server",
+      codex_model: "gpt-5.1-codex-mini",
+      codex_reasoning_effort: "high"
+    )
+
+    config = Config.settings!()
+    assert config.codex.model == "gpt-5.1-codex-mini"
+    assert config.codex.reasoning_effort == "high"
+    assert config.codex.command == "codex --config shell_environment_policy.inherit=all --config model_reasoning_effort=high --model gpt-5.1-codex-mini app-server"
 
     explicit_root =
       Path.join(

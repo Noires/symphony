@@ -752,6 +752,14 @@ defmodule SymphonyElixir.GitHub.Client do
 
   defp graphql_data(query, variables, opts) when is_binary(query) and is_map(variables) and is_list(opts) do
     case graphql(query, variables, opts) do
+      {:ok, %{"data" => data, "errors" => errors}} when is_map(data) and is_list(errors) and errors != [] ->
+        if graphql_data_all_nil?(data) do
+          {:error, {:github_graphql_errors, errors}}
+        else
+          Logger.debug("GitHub GraphQL partial errors (ignored): #{inspect(errors)}")
+          {:ok, data}
+        end
+
       {:ok, %{"errors" => errors}} when is_list(errors) and errors != [] ->
         {:error, {:github_graphql_errors, errors}}
 
@@ -764,6 +772,10 @@ defmodule SymphonyElixir.GitHub.Client do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp graphql_data_all_nil?(data) when is_map(data) do
+    data |> Map.values() |> Enum.all?(&is_nil/1)
   end
 
   defp api_token do

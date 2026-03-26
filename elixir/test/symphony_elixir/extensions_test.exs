@@ -817,6 +817,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                setting["source"] == "workflow"
            end)
 
+    assert Enum.any?(settings_payload["settings"], fn setting ->
+             setting["path"] == "codex.model" and setting["source"] == "default"
+           end)
+
+    assert Enum.any?(settings_payload["settings"], fn setting ->
+             setting["path"] == "codex.reasoning_effort" and setting["source"] == "default"
+           end)
+
     updated_payload =
       json_response(
         post(build_conn(), "/api/v1/settings", %{
@@ -1542,6 +1550,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "GitHub workspace access"
     assert html =~ "UI-managed settings"
     assert html =~ "Recent changes"
+    assert html =~ "Codex Model"
+    assert html =~ "Reasoning Effort"
 
     render_change(view, "update_operator_token", %{"operator_token" => "dash-settings-token"})
 
@@ -1578,6 +1588,20 @@ defmodule SymphonyElixir.ExtensionsTest do
 
       Enum.find(payload.settings, &(&1.path == "source_repo_url")).effective_value ==
         "https://github.com/example/updated-repo.git"
+    end)
+
+    github_landing_html =
+      render_submit(view, "update_github_access_setting", %{
+        "path" => "landing_mode",
+        "value" => "pull_request"
+      })
+
+    assert github_landing_html =~ "GitHub workspace access"
+
+    assert_eventually(fn ->
+      {:ok, payload} = SymphonyElixir.GitHubAccess.payload()
+
+      Enum.find(payload.settings, &(&1.path == "landing_mode")).effective_value == "pull_request"
     end)
 
     token_html =
