@@ -818,11 +818,11 @@ defmodule SymphonyElixir.ExtensionsTest do
            end)
 
     assert Enum.any?(settings_payload["settings"], fn setting ->
-             setting["path"] == "codex.model" and setting["source"] == "default"
+             setting["path"] == "codex.model" and setting["source"] == "workflow"
            end)
 
     assert Enum.any?(settings_payload["settings"], fn setting ->
-             setting["path"] == "codex.reasoning_effort" and setting["source"] == "default"
+             setting["path"] == "codex.reasoning_effort" and setting["source"] == "workflow"
            end)
 
     updated_payload =
@@ -1361,10 +1361,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute html =~ "<style>"
 
     dashboard_css = response(get(build_conn(), "/dashboard.css"), 200)
-    assert dashboard_css =~ ":root {"
-    assert dashboard_css =~ "html[data-theme=\"light\"]"
+    assert dashboard_css =~ "html[data-theme=light]"
     assert dashboard_css =~ ".skip-link"
-    assert dashboard_css =~ ".app-header"
+    assert dashboard_css =~ ".command-bar"
+    assert dashboard_css =~ ".section-frame"
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -1480,10 +1480,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     refute overview_html =~ "UI-managed settings"
 
     {:ok, _approvals_view, approvals_html} = live(build_conn(), "/approvals")
-    assert approvals_html =~ "Approval Control"
-    assert approvals_html =~ "Pending approvals"
-    assert approvals_html =~ "Active overrides"
-    assert approvals_html =~ "Guardrail rules"
+    assert approvals_html =~ "Approval controls are unavailable"
+    assert approvals_html =~ "Use workflow-state review instead"
+    assert approvals_html =~ "Open runs"
+    refute approvals_html =~ "Pending approvals"
+    refute approvals_html =~ "Active overrides"
     refute approvals_html =~ "UI-managed settings"
 
     {:ok, _settings_view, settings_html} = live(build_conn(), "/settings")
@@ -1525,12 +1526,62 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert runs_html =~ "name=\"q\""
     assert runs_html =~ "value=\"MT-HTTP\""
     assert runs_html =~ ~r/<option[^>]*(selected[^>]*value="tokens"|value="tokens"[^>]*selected)/
-    assert runs_html =~ ~r/<option[^>]*(selected[^>]*value="cheap"|value="cheap"[^>]*selected)/
+    assert runs_html =~ ~s(name="view")
+    assert runs_html =~ ~s(value="cheap")
 
     {:ok, _approvals_view, approvals_html} = live(build_conn(), "/approvals?q=needle&risk_level=high")
-    assert approvals_html =~ "name=\"q\""
-    assert approvals_html =~ "value=\"needle\""
-    assert approvals_html =~ ~r/<option[^>]*(selected[^>]*value="high"|value="high"[^>]*selected)/
+    assert approvals_html =~ "Approval controls are unavailable"
+    assert approvals_html =~ "Use workflow-state review instead"
+    refute approvals_html =~ "name=\"q\""
+  end
+
+  test "container boundary mode disables approval APIs and hides approval surfaces" do
+    orchestrator_name = Module.concat(__MODULE__, :ContainerBoundaryOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: static_snapshot(),
+        refresh: %{
+          queued: true,
+          coalesced: true,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    assert json_response(get(build_conn(), "/api/v1/guardrails/approvals"), 410) == %{
+             "error" => %{
+               "code" => "approval_controls_unsupported",
+               "message" => "Codex approval controls are disabled in container-boundary mode"
+             }
+           }
+
+    assert json_response(get(build_conn(), "/api/v1/guardrails/overrides"), 410) == %{
+             "error" => %{
+               "code" => "approval_controls_unsupported",
+               "message" => "Codex approval controls are disabled in container-boundary mode"
+             }
+           }
+
+    assert json_response(post(build_conn(), "/api/v1/guardrails/overrides/workflow/enable", %{}), 410) == %{
+             "error" => %{
+               "code" => "approval_controls_unsupported",
+               "message" => "Codex approval controls are disabled in container-boundary mode"
+             }
+           }
+
+    {:ok, _overview_view, overview_html} = live(build_conn(), "/")
+    refute overview_html =~ "Open approvals"
+    refute overview_html =~ "Urgent approvals"
+    refute overview_html =~ ~s(href="/approvals")
+
+    {:ok, _approvals_view, approvals_html} = live(build_conn(), "/approvals")
+    assert approvals_html =~ "Approval controls are unavailable"
+    refute approvals_html =~ "Active overrides"
+    refute approvals_html =~ "Pending approvals"
   end
 
   test "dashboard liveview can edit UI-managed runtime settings with operator token" do
@@ -1689,7 +1740,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
-    assert dashboard_css.body =~ ":root {"
+    assert dashboard_css.body =~ "html[data-theme=light]"
 
     phoenix_js = Req.get!("http://127.0.0.1:#{port}/vendor/phoenix/phoenix.js")
     assert phoenix_js.status == 200

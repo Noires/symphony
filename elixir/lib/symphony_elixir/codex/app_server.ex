@@ -55,7 +55,7 @@ defmodule SymphonyElixir.Codex.AppServer do
              port: port,
              metadata: metadata,
              approval_policy: session_policies.approval_policy,
-             auto_approve_requests: session_policies.approval_policy == "never",
+             auto_approve_requests: false,
              guardrails_override: Keyword.get(opts, :guardrails_override) || Keyword.get(opts, :full_access_override),
              guardrail_rules: Keyword.get(opts, :guardrail_rules, []),
              thread_sandbox: session_policies.thread_sandbox,
@@ -657,35 +657,15 @@ defmodule SymphonyElixir.Codex.AppServer do
       :approved ->
         receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, guardrails_context)
 
-      {:pending_review, evaluation} ->
+      {:unsupported_in_container_boundary, details} ->
         emit_message(
           on_message,
-          :approval_required,
-          %{payload: payload, raw: payload_string, evaluation: evaluation},
+          :approval_unsupported_in_container_boundary,
+          %{payload: payload, raw: payload_string, details: details},
           metadata
         )
 
-        {:error, {:approval_pending, evaluation}}
-
-      :approval_required ->
-        emit_message(
-          on_message,
-          :approval_required,
-          %{payload: payload, raw: payload_string},
-          metadata
-        )
-
-        {:error, {:approval_required, payload}}
-
-      {:denied, evaluation} ->
-        emit_message(
-          on_message,
-          :approval_denied,
-          %{payload: payload, raw: payload_string, evaluation: evaluation},
-          metadata
-        )
-
-        {:error, {:approval_denied, evaluation}}
+        {:error, {:approval_unsupported_in_container_boundary, details}}
 
       {:error, reason} ->
         {:error, reason}
@@ -933,105 +913,35 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp resolve_approval_request(
-         port,
-         _method,
-         id,
-         decision,
-         payload,
-         payload_string,
-         on_message,
-         metadata,
-         true,
-         _guardrails_context
-       ) do
-    send_approval_response(port, id, decision, payload, payload_string, on_message, metadata, %{source: "approval_policy"})
-  end
-
-  defp resolve_approval_request(
-         port,
+         _port,
          method,
-         id,
-         decision,
+         _id,
+         _decision,
          payload,
-         payload_string,
-         on_message,
-         metadata,
-         false,
+         _payload_string,
+         _on_message,
+         _metadata,
+         _auto_approve_requests,
          guardrails_context
        ) do
-    if Policy.enabled?() do
-      evaluation =
-        method
-        |> Policy.evaluate_approval_request(
-          Map.put(payload, "method", method),
-          guardrails_context
-        )
-
-      case evaluation.disposition do
-        :allow ->
-          send_approval_response(
-            port,
-            id,
-            decision,
-            payload,
-            payload_string,
-            on_message,
-            metadata,
-            Map.take(evaluation, [:source, :rule_id, :rule_scope, :decision_mode])
-          )
-
-        :review ->
-          {:pending_review, evaluation}
-
-        :deny ->
-          {:denied, evaluation}
-      end
-    else
-      :approval_required
-    end
+    {:unsupported_in_container_boundary,
+     %{
+       method: method,
+       reason: "container-boundary mode does not support Codex approval requests",
+       explanation:
+         safe_explain_approval_request(
+           method,
+           Map.put(payload, "method", method),
+           guardrails_context
+         )
+     }}
   end
 
-  defp send_approval_response(
-         port,
-         id,
-         decision,
-         payload,
-         payload_string,
-         on_message,
-         metadata,
-         source_details
-       ) do
-    case send_message(port, %{"id" => id, "result" => %{"decision" => decision}}) do
-      :ok ->
-        approval_details =
-          source_details
-          |> normalize_approval_source_details()
-          |> Map.merge(%{payload: payload, raw: payload_string, decision: decision})
-
-        emit_message(
-          on_message,
-          :approval_auto_approved,
-          approval_details,
-          metadata
-        )
-
-        :approved
-
-      {:error, reason} ->
-        {:error, {:approval_response_send_failed, decision, reason}}
-    end
+  defp safe_explain_approval_request(method, payload, guardrails_context) do
+    Policy.explain_approval_request(method, payload, guardrails_context)
+  rescue
+    _ -> %{}
   end
-
-  defp normalize_approval_source_details(%{} = details) do
-    details
-    |> Enum.reduce(%{}, fn
-      {_key, nil}, acc -> acc
-      {key, value}, acc -> Map.put(acc, key, value)
-    end)
-  end
-
-  defp normalize_approval_source_details(source) when is_binary(source), do: %{source: source}
-  defp normalize_approval_source_details(_source), do: %{}
 
   defp maybe_auto_answer_tool_request_user_input(
          port,

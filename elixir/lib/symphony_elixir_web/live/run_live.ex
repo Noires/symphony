@@ -234,7 +234,13 @@ defmodule SymphonyElixirWeb.RunLive do
         <DashboardComponents.section_frame
           kicker="Operator control"
           title="Guardrails"
-          copy="Approve blocked actions and control full access directly from this run view. Enter operator token in the command bar above."
+          copy={
+            if(
+              approval_controls_supported?(),
+              do: "Approve blocked actions and control full access directly from this run view. Enter operator token in the command bar above.",
+              else: "Container-boundary mode disables in-run Codex approval and full-access controls. Use the operator token here for rule management and admin actions only."
+            )
+          }
         >
           <DashboardComponents.key_value_list
             items={[
@@ -750,10 +756,10 @@ defmodule SymphonyElixirWeb.RunLive do
   defp run_navigation_items do
     [
       %{label: "Overview", href: "/", current: false},
-      %{label: "Approvals", href: "/approvals", current: false},
       %{label: "Settings", href: "/settings", current: false},
       %{label: "Runs", href: "/runs", current: true}
     ]
+    |> maybe_insert_run_approvals_nav()
   end
 
   defp run_utility_items(%{urls: urls}) when is_map(urls) do
@@ -1087,6 +1093,7 @@ defmodule SymphonyElixirWeb.RunLive do
   defp humanize_guardrail_error(:approval_not_found), do: "Approval not found."
   defp humanize_guardrail_error(:approval_stale), do: "Approval is no longer pending."
   defp humanize_guardrail_error({:approval_already_resolved, decision}), do: "Approval was already resolved as #{decision}."
+  defp humanize_guardrail_error(:approval_controls_unsupported), do: "Codex approval controls are disabled in container-boundary mode."
   defp humanize_guardrail_error(:override_not_found), do: "Full-access override not found."
   defp humanize_guardrail_error(:rule_not_found), do: "Guardrail rule not found."
   defp humanize_guardrail_error(:operator_action_rate_limited), do: "Another operator action just updated this item. Try again in a moment."
@@ -1109,4 +1116,16 @@ defmodule SymphonyElixirWeb.RunLive do
   end
 
   defp blank_to_nil(_value), do: nil
+
+  defp approval_controls_supported? do
+    Config.approval_controls_supported?()
+  end
+
+  defp maybe_insert_run_approvals_nav(items) when is_list(items) do
+    if approval_controls_supported?() do
+      List.insert_at(items, 1, %{label: "Approvals", href: "/approvals", current: false})
+    else
+      items
+    end
+  end
 end

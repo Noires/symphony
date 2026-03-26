@@ -5,7 +5,6 @@ defmodule SymphonyElixir.Config do
 
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.GitHubAccess
-  alias SymphonyElixir.Guardrails.Overrides
   alias SymphonyElixir.SettingsOverlay
   alias SymphonyElixir.Workflow
 
@@ -71,6 +70,21 @@ defmodule SymphonyElixir.Config do
     settings!().guardrails.enabled == true
   end
 
+  @spec execution_boundary() :: String.t()
+  def execution_boundary do
+    "container"
+  end
+
+  @spec container_boundary_mode?() :: boolean()
+  def container_boundary_mode? do
+    true
+  end
+
+  @spec approval_controls_supported?() :: boolean()
+  def approval_controls_supported? do
+    false
+  end
+
   @spec workflow_prompt() :: String.t()
   def workflow_prompt do
     default_prompt = default_prompt_template()
@@ -102,21 +116,20 @@ defmodule SymphonyElixir.Config do
   @spec codex_runtime_settings(Path.t() | nil, keyword()) ::
           {:ok, codex_runtime_settings()} | {:error, term()}
   def codex_runtime_settings(workspace \\ nil, opts \\ []) do
-    with {:ok, settings} <- settings() do
-      with {:ok, turn_sandbox_policy} <-
-             Schema.resolve_runtime_turn_sandbox_policy(settings, workspace, opts) do
-        runtime_settings = %{
-          approval_policy: settings.codex.approval_policy,
-          thread_sandbox: settings.codex.thread_sandbox,
-          turn_sandbox_policy: turn_sandbox_policy
-        }
+    _ = workspace
+    _ = opts
 
-        {:ok,
-         runtime_settings
-         |> Overrides.apply_runtime_settings(Keyword.get(opts, :guardrails_override))
-         |> Overrides.apply_runtime_settings(Keyword.get(opts, :full_access_override))}
-      end
+    with {:ok, _settings} <- settings() do
+      {:ok, container_boundary_runtime_settings()}
     end
+  end
+
+  defp container_boundary_runtime_settings do
+    %{
+      approval_policy: "never",
+      thread_sandbox: "danger-full-access",
+      turn_sandbox_policy: %{"type" => "dangerFullAccess"}
+    }
   end
 
   defp validate_semantics(settings) do

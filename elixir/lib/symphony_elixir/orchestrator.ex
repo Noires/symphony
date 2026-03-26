@@ -62,9 +62,7 @@ defmodule SymphonyElixir.Orchestrator do
   def init(_opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
-    pending_approvals = load_pending_approvals()
     guardrail_rules = load_guardrail_rules()
-    guardrail_overrides = load_guardrail_overrides()
 
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
@@ -73,10 +71,10 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
-      claimed: pending_approvals |> Map.keys() |> MapSet.new(),
-      pending_approvals: pending_approvals,
+      claimed: MapSet.new(),
+      pending_approvals: %{},
       guardrail_rules: guardrail_rules,
-      guardrail_overrides: guardrail_overrides,
+      guardrail_overrides: Overrides.empty_state(),
       codex_totals: @empty_codex_totals,
       codex_rate_limits: nil
     }
@@ -153,13 +151,24 @@ defmodule SymphonyElixir.Orchestrator do
 
         state =
           case reason do
-            {:approval_pending, evaluation} ->
-              Logger.info("Agent task paused for guardrail approval for issue_id=#{issue_id} session_id=#{session_id}")
-              pause_issue_for_approval(state, issue_id, running_entry, evaluation)
+            {:approval_unsupported_in_container_boundary, details} ->
+              Logger.warning("Agent task requested unsupported approval control in container-boundary mode for issue_id=#{issue_id} session_id=#{session_id}; failing run without retry")
 
-            {:approval_denied, evaluation} ->
-              Logger.warning("Agent task denied by guardrail policy for issue_id=#{issue_id} session_id=#{session_id}")
-              deny_issue_by_policy(state, issue_id, running_entry, evaluation)
+              error =
+                details
+                |> Map.get(:reason, "container-boundary mode does not support Codex approval requests")
+                |> to_string()
+
+              finish_run_with_followups(running_entry, %{
+                status: "failed",
+                next_action: "unsupported_runtime",
+                last_error: error,
+                issue_state_finished: running_entry.issue.state
+              })
+
+              state
+              |> complete_issue(running_entry.issue)
+              |> release_issue_claim(issue_id)
 
             :normal ->
               if Config.settings!().agent.continue_on_active_issue do
@@ -292,7 +301,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> prune_guardrail_rules()
       |> prune_guardrail_overrides()
       |> reconcile_running_issues()
-      |> reconcile_pending_approval_issues()
+      |> maybe_reconcile_pending_approval_issues()
 
     with :ok <- Config.validate!(),
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
@@ -407,141 +416,11 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp reconcile_pending_approval_issues(%State{} = state) do
-    pending_issue_ids = Map.keys(state.pending_approvals)
-
-    if pending_issue_ids == [] do
-      state
-    else
-      case Tracker.fetch_issue_states_by_ids(pending_issue_ids) do
-        {:ok, issues} ->
-          issues
-          |> reconcile_pending_approval_issue_states(
-            state,
-            active_state_set(),
-            terminal_state_set()
-          )
-          |> reconcile_missing_pending_approval_issue_ids(pending_issue_ids, issues)
-
-        {:error, reason} ->
-          Logger.debug("Failed to refresh pending approval issue states: #{inspect(reason)}; keeping pending approvals as-is")
-          state
-      end
-    end
+  defp maybe_reconcile_pending_approval_issues(%State{} = state) do
+    %{state | pending_approvals: %{}}
   end
 
-  defp reconcile_pending_approval_issue_states([], state, _active_states, _terminal_states), do: state
-
-  defp reconcile_pending_approval_issue_states([issue | rest], state, active_states, terminal_states) do
-    reconcile_pending_approval_issue_states(
-      rest,
-      reconcile_pending_approval_issue_state(issue, state, active_states, terminal_states),
-      active_states,
-      terminal_states
-    )
-  end
-
-  defp reconcile_pending_approval_issue_state(%Issue{id: issue_id} = issue, %State{} = state, active_states, terminal_states)
-       when is_binary(issue_id) do
-    case Map.get(state.pending_approvals, issue_id) do
-      nil ->
-        state
-
-      approval ->
-        cond do
-          terminal_issue_state?(issue.state, terminal_states) ->
-            Logger.info("Issue moved to terminal state while awaiting approval: #{issue_context(issue)} state=#{issue.state}; clearing pending approval")
-
-            clear_pending_approval(state, issue_id, "issue moved to terminal state: #{issue.state}", cleanup_workspace: true)
-
-          !active_issue_state?(issue.state, active_states) ->
-            Logger.info("Issue moved out of active states while awaiting approval: #{issue_context(issue)} state=#{issue.state}; clearing pending approval")
-
-            clear_pending_approval(state, issue_id, "issue moved to non-active state: #{issue.state}")
-
-          true ->
-            updated_approval = Approvals.update_issue_state(approval, issue.state)
-            %{state | pending_approvals: Map.put(state.pending_approvals, issue_id, updated_approval)}
-        end
-    end
-  end
-
-  defp reconcile_pending_approval_issue_state(_issue, state, _active_states, _terminal_states), do: state
-
-  defp reconcile_missing_pending_approval_issue_ids(%State{} = state, requested_issue_ids, issues)
-       when is_list(requested_issue_ids) and is_list(issues) do
-    visible_issue_ids =
-      issues
-      |> Enum.flat_map(fn
-        %Issue{id: issue_id} when is_binary(issue_id) -> [issue_id]
-        _ -> []
-      end)
-      |> MapSet.new()
-
-    Enum.reduce(requested_issue_ids, state, fn issue_id, state_acc ->
-      if MapSet.member?(visible_issue_ids, issue_id) do
-        state_acc
-      else
-        Logger.info("Issue no longer visible while awaiting approval: issue_id=#{issue_id}; clearing pending approval")
-        clear_pending_approval(state_acc, issue_id, "issue no longer visible")
-      end
-    end)
-  end
-
-  defp reconcile_missing_pending_approval_issue_ids(state, _requested_issue_ids, _issues), do: state
-
-  defp pause_issue_for_approval(%State{} = state, issue_id, running_entry, evaluation)
-       when is_binary(issue_id) and is_map(running_entry) and is_map(evaluation) do
-    approval = Approvals.new(running_entry, evaluation)
-    identifier = Map.get(running_entry, :identifier, issue_id)
-
-    AuditLog.finish_run(running_entry, %{
-      status: "blocked",
-      next_action: "awaiting_approval",
-      issue_state_finished: running_entry.issue.state
-    })
-
-    AuditLog.put_guardrail_approval(approval)
-    maybe_record_approval_audit(approval)
-
-    Logger.info("Run paused for operator approval issue_id=#{issue_id} issue_identifier=#{identifier} approval_id=#{approval.id} action_type=#{approval.action_type}")
-
-    %{
-      state
-      | pending_approvals: Map.put(state.pending_approvals, issue_id, approval),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
-    }
-  end
-
-  defp deny_issue_by_policy(%State{} = state, issue_id, running_entry, evaluation)
-       when is_binary(issue_id) and is_map(running_entry) and is_map(evaluation) do
-    approval =
-      running_entry
-      |> Approvals.new(evaluation)
-      |> Map.put(:status, "denied_by_policy")
-
-    identifier = Map.get(running_entry, :identifier, issue_id)
-
-    AuditLog.finish_run(running_entry, %{
-      status: "blocked",
-      next_action: "denied_by_policy",
-      last_error: evaluation[:reason],
-      issue_state_finished: running_entry.issue.state
-    })
-
-    AuditLog.put_guardrail_approval(approval)
-    maybe_record_approval_audit(approval)
-
-    Logger.warning("Run denied by policy and held for operator review issue_id=#{issue_id} issue_identifier=#{identifier} approval_id=#{approval.id} action_type=#{approval.action_type}")
-
-    %{
-      state
-      | pending_approvals: Map.put(state.pending_approvals, issue_id, approval),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
-    }
-  end
-
-  defp clear_pending_approval(%State{} = state, issue_id, reason, opts \\ [])
+  defp clear_pending_approval(%State{} = state, issue_id, reason, opts)
        when is_binary(issue_id) and is_binary(reason) do
     case Map.get(state.pending_approvals, issue_id) do
       %Approvals{} = approval ->
@@ -574,20 +453,6 @@ defmodule SymphonyElixir.Orchestrator do
         if Keyword.get(opts, :release_claim, true), do: release_issue_claim(state, issue_id), else: state
     end
   end
-
-  defp maybe_record_approval_audit(%Approvals{issue_identifier: issue_identifier, run_id: run_id} = approval)
-       when is_binary(issue_identifier) and is_binary(run_id) do
-    AuditLog.record_run_event(
-      issue_identifier,
-      run_id,
-      Approvals.audit_event(approval),
-      %{
-        "pending_approval" => Approvals.snapshot_entry(approval)
-      }
-    )
-  end
-
-  defp maybe_record_approval_audit(_approval), do: :ok
 
   defp maybe_record_approval_cancellation_audit(%Approvals{issue_identifier: issue_identifier, run_id: run_id} = approval, reason)
        when is_binary(issue_identifier) and is_binary(run_id) and is_binary(reason) do
@@ -636,24 +501,6 @@ defmodule SymphonyElixir.Orchestrator do
     %{state | guardrail_overrides: pruned}
   end
 
-  defp load_pending_approvals do
-    case AuditLog.list_guardrail_approvals(statuses: ["pending_review", "denied_by_policy"]) do
-      {:ok, approvals} ->
-        Enum.reduce(approvals, %{}, fn snapshot, acc ->
-          case Approvals.from_snapshot(snapshot) do
-            %Approvals{issue_id: issue_id} = approval when is_binary(issue_id) ->
-              Map.put(acc, issue_id, approval)
-
-            _ ->
-              acc
-          end
-        end)
-
-      _ ->
-        %{}
-    end
-  end
-
   defp load_guardrail_rules do
     case AuditLog.list_guardrail_rules(active_only: true) do
       {:ok, rules} ->
@@ -669,27 +516,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       _ ->
         %{}
-    end
-  end
-
-  defp load_guardrail_overrides do
-    case AuditLog.list_guardrail_overrides(active_only: true) do
-      {:ok, overrides} ->
-        Enum.reduce(overrides, Overrides.empty_state(), fn snapshot, acc ->
-          case Overrides.from_snapshot(snapshot) do
-            %Overrides{scope: "workflow"} = override ->
-              %{acc | workflow: override}
-
-            %Overrides{scope: "run", scope_key: run_id} = override when is_binary(run_id) ->
-              %{acc | runs: Map.put(acc.runs, run_id, override)}
-
-            _ ->
-              acc
-          end
-        end)
-
-      _ ->
-        Overrides.empty_state()
     end
   end
 
@@ -1167,7 +993,7 @@ defmodule SymphonyElixir.Orchestrator do
     started_at = DateTime.utc_now()
     timing = build_run_timing(state, issue, attempt, started_at, normalize_dispatch_metadata(dispatch_metadata))
     guardrail_rules = effective_guardrail_rules(state, run_id)
-    guardrails_override = Overrides.effective_override(state.guardrail_overrides, run_id, started_at)
+    guardrails_override = nil
 
     case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
            AgentRunner.run(
@@ -2795,11 +2621,8 @@ defmodule SymphonyElixir.Orchestrator do
           {:ok, map()} | {:error, term()}
   def decide_guardrail_approval(server, approval_id, decision, opts)
       when is_binary(approval_id) and is_binary(decision) do
-    if Process.whereis(server) do
-      GenServer.call(server, {:decide_guardrail_approval, approval_id, decision, opts}, 30_000)
-    else
-      {:error, :unavailable}
-    end
+    _ = {server, approval_id, decision, opts}
+    {:error, :approval_controls_unsupported}
   end
 
   @spec disable_guardrail_rule(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -2851,11 +2674,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec explain_guardrail_approval(GenServer.server(), String.t()) :: {:ok, map()} | {:error, term()}
   def explain_guardrail_approval(server, approval_id) when is_binary(approval_id) do
-    if Process.whereis(server) do
-      GenServer.call(server, {:explain_guardrail_approval, approval_id}, 30_000)
-    else
-      {:error, :unavailable}
-    end
+    _ = {server, approval_id}
+    {:error, :approval_controls_unsupported}
   end
 
   @spec enable_full_access_for_run(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -2865,11 +2685,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec enable_full_access_for_run(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def enable_full_access_for_run(server, run_id, opts) when is_binary(run_id) do
-    if Process.whereis(server) do
-      GenServer.call(server, {:enable_full_access_for_run, run_id, opts}, 30_000)
-    else
-      {:error, :unavailable}
-    end
+    _ = {server, run_id, opts}
+    {:error, :approval_controls_unsupported}
   end
 
   @spec disable_full_access_for_run(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
@@ -2879,11 +2696,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec disable_full_access_for_run(GenServer.server(), String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def disable_full_access_for_run(server, run_id, opts) when is_binary(run_id) do
-    if Process.whereis(server) do
-      GenServer.call(server, {:disable_full_access_for_run, run_id, opts}, 30_000)
-    else
-      {:error, :unavailable}
-    end
+    _ = {server, run_id, opts}
+    {:error, :approval_controls_unsupported}
   end
 
   @spec enable_full_access_for_workflow(keyword()) :: {:ok, map()} | {:error, term()}
@@ -2893,11 +2707,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec enable_full_access_for_workflow(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
   def enable_full_access_for_workflow(server, opts) do
-    if Process.whereis(server) do
-      GenServer.call(server, {:enable_full_access_for_workflow, opts}, 30_000)
-    else
-      {:error, :unavailable}
-    end
+    _ = {server, opts}
+    {:error, :approval_controls_unsupported}
   end
 
   @spec disable_full_access_for_workflow(keyword()) :: {:ok, map()} | {:error, term()}
@@ -2907,11 +2718,8 @@ defmodule SymphonyElixir.Orchestrator do
 
   @spec disable_full_access_for_workflow(GenServer.server(), keyword()) :: {:ok, map()} | {:error, term()}
   def disable_full_access_for_workflow(server, opts) do
-    if Process.whereis(server) do
-      GenServer.call(server, {:disable_full_access_for_workflow, opts}, 30_000)
-    else
-      {:error, :unavailable}
-    end
+    _ = {server, opts}
+    {:error, :approval_controls_unsupported}
   end
 
   @spec snapshot(GenServer.server(), timeout()) :: map() | :timeout | :unavailable
@@ -3010,13 +2818,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:decide_guardrail_approval, approval_id, decision, opts}, _from, state) do
-    case handle_guardrail_approval_decision(state, approval_id, decision, opts) do
-      {:ok, response, state} ->
-        notify_dashboard()
-        {:reply, {:ok, response}, state}
+    if Config.approval_controls_supported?() do
+      case handle_guardrail_approval_decision(state, approval_id, decision, opts) do
+        {:ok, response, state} ->
+          notify_dashboard()
+          {:reply, {:ok, response}, state}
 
-      {:error, reason, state} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :approval_controls_unsupported}, state}
     end
   end
 
@@ -3054,56 +2866,76 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_call({:explain_guardrail_approval, approval_id}, _from, state) do
-    case explain_guardrail_approval_in_state(state, approval_id) do
-      {:ok, response, state} ->
-        {:reply, {:ok, response}, state}
+    if Config.approval_controls_supported?() do
+      case explain_guardrail_approval_in_state(state, approval_id) do
+        {:ok, response, state} ->
+          {:reply, {:ok, response}, state}
 
-      {:error, reason, state} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :approval_controls_unsupported}, state}
     end
   end
 
   def handle_call({:enable_full_access_for_run, run_id, opts}, _from, state) do
-    case enable_run_full_access_override(state, run_id, opts) do
-      {:ok, response, state} ->
-        notify_dashboard()
-        {:reply, {:ok, response}, state}
+    if Config.approval_controls_supported?() do
+      case enable_run_full_access_override(state, run_id, opts) do
+        {:ok, response, state} ->
+          notify_dashboard()
+          {:reply, {:ok, response}, state}
 
-      {:error, reason, state} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :approval_controls_unsupported}, state}
     end
   end
 
   def handle_call({:disable_full_access_for_run, run_id, opts}, _from, state) do
-    case disable_run_full_access_override(state, run_id, opts) do
-      {:ok, response, state} ->
-        notify_dashboard()
-        {:reply, {:ok, response}, state}
+    if Config.approval_controls_supported?() do
+      case disable_run_full_access_override(state, run_id, opts) do
+        {:ok, response, state} ->
+          notify_dashboard()
+          {:reply, {:ok, response}, state}
 
-      {:error, reason, state} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :approval_controls_unsupported}, state}
     end
   end
 
   def handle_call({:enable_full_access_for_workflow, opts}, _from, state) do
-    case enable_workflow_full_access_override(state, opts) do
-      {{:ok, response}, state} ->
-        notify_dashboard()
-        {:reply, {:ok, response}, state}
+    if Config.approval_controls_supported?() do
+      case enable_workflow_full_access_override(state, opts) do
+        {{:ok, response}, state} ->
+          notify_dashboard()
+          {:reply, {:ok, response}, state}
 
-      {{:error, reason}, state} ->
-        {:reply, {:error, reason}, state}
+        {{:error, reason}, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :approval_controls_unsupported}, state}
     end
   end
 
   def handle_call({:disable_full_access_for_workflow, opts}, _from, state) do
-    case disable_workflow_full_access_override(state, opts) do
-      {:ok, response, state} ->
-        notify_dashboard()
-        {:reply, {:ok, response}, state}
+    if Config.approval_controls_supported?() do
+      case disable_workflow_full_access_override(state, opts) do
+        {:ok, response, state} ->
+          notify_dashboard()
+          {:reply, {:ok, response}, state}
 
-      {:error, reason, state} ->
-        {:reply, {:error, reason}, state}
+        {:error, reason, state} ->
+          {:reply, {:error, reason}, state}
+      end
+    else
+      {:reply, {:error, :approval_controls_unsupported}, state}
     end
   end
 

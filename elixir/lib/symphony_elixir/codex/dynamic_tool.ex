@@ -32,6 +32,8 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   @trello_api_tool "trello_api"
   @trello_api_description """
   Execute a Trello REST API request using Symphony's configured Trello auth.
+  For card comments, use `POST /cards/{cardId}/actions/comments` with `text`.
+  To edit an existing comment action, use `PUT /actions/{actionId}` with `text`.
   """
   @trello_api_input_schema %{
     "type" => "object",

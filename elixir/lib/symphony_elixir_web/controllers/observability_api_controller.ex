@@ -377,82 +377,25 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec guardrail_approvals(Conn.t(), map()) :: Conn.t()
   def guardrail_approvals(conn, _params) do
-    payload = Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
-
-    if payload[:error] do
-      error_response(conn, 503, payload.error.code, payload.error.message)
-    else
-      json(conn, %{pending_approvals: filter_pending_approvals(payload.pending_approvals, conn.params)})
-    end
+    approval_controls_unsupported_response(conn)
   end
 
   @spec guardrail_approval(Conn.t(), map()) :: Conn.t()
   def guardrail_approval(conn, %{"approval_id" => approval_id}) do
-    case AuditLog.get_guardrail_approval(approval_id) do
-      {:ok, approval} -> json(conn, %{approval: approval})
-      {:error, :not_found} -> error_response(conn, 404, "approval_not_found", "Approval not found")
-    end
+    _ = approval_id
+    approval_controls_unsupported_response(conn)
   end
 
   @spec explain_guardrail_approval(Conn.t(), map()) :: Conn.t()
   def explain_guardrail_approval(conn, %{"approval_id" => approval_id}) do
-    case Orchestrator.explain_guardrail_approval(orchestrator(), approval_id) do
-      {:ok, payload} ->
-        json(conn, payload)
-
-      {:error, :approval_not_found} ->
-        error_response(conn, 404, "approval_not_found", "Approval not found")
-
-      {:error, :guardrails_disabled} ->
-        error_response(conn, 409, "guardrails_disabled", "Guardrails are disabled in the current workflow")
-
-      {:error, reason} ->
-        error_response(conn, 409, "guardrail_explain_failed", "Failed to explain approval: #{inspect(reason)}")
-    end
+    _ = approval_id
+    approval_controls_unsupported_response(conn)
   end
 
   @spec decide_guardrail_approval(Conn.t(), map()) :: Conn.t()
   def decide_guardrail_approval(conn, %{"approval_id" => approval_id} = params) do
-    with :ok <- authorize_operator(params, conn),
-         decision when is_binary(decision) <- params["decision"],
-         {:ok, payload} <-
-           Orchestrator.decide_guardrail_approval(
-             orchestrator(),
-             approval_id,
-             decision,
-             actor: params["actor"] || "api",
-             reason: params["reason"],
-             scope: params["scope"]
-           ) do
-      json(conn, payload)
-    else
-      {:error, :operator_token_not_configured} ->
-        error_response(conn, 503, "operator_token_not_configured", "Operator token is not configured")
-
-      {:error, :operator_token_invalid} ->
-        error_response(conn, 403, "operator_token_invalid", "Operator token is invalid")
-
-      {:error, :guardrails_disabled} ->
-        error_response(conn, 409, "guardrails_disabled", "Guardrails are disabled in the current workflow")
-
-      {:error, :approval_not_found} ->
-        error_response(conn, 404, "approval_not_found", "Approval not found")
-
-      {:error, :approval_stale} ->
-        error_response(conn, 409, "approval_stale", "Approval is no longer pending")
-
-      {:error, {:approval_already_resolved, decision}} ->
-        error_response(conn, 409, "approval_already_resolved", "Approval was already resolved as #{decision}")
-
-      {:error, :operator_action_rate_limited} ->
-        error_response(conn, 409, "operator_action_rate_limited", "Another operator action just updated this item")
-
-      {:error, reason} ->
-        error_response(conn, 409, "guardrail_decision_failed", "Guardrail decision failed: #{inspect(reason)}")
-
-      _ ->
-        error_response(conn, 400, "invalid_decision", "Missing or invalid guardrail decision")
-    end
+    _ = {approval_id, params}
+    approval_controls_unsupported_response(conn)
   end
 
   @spec guardrail_rules(Conn.t(), map()) :: Conn.t()
@@ -566,133 +509,31 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   @spec guardrail_overrides(Conn.t(), map()) :: Conn.t()
   def guardrail_overrides(conn, _params) do
-    payload = Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
-
-    if payload[:error] do
-      error_response(conn, 503, payload.error.code, payload.error.message)
-    else
-      json(conn, %{guardrail_overrides: filter_guardrail_overrides(payload.guardrail_overrides, conn.params)})
-    end
+    approval_controls_unsupported_response(conn)
   end
 
   @spec enable_run_full_access(Conn.t(), map()) :: Conn.t()
   def enable_run_full_access(conn, %{"run_id" => run_id} = params) do
-    with :ok <- authorize_operator(params, conn),
-         {:ok, payload} <-
-           Orchestrator.enable_full_access_for_run(
-             orchestrator(),
-             run_id,
-             actor: params["actor"] || "api",
-             reason: params["reason"]
-           ) do
-      json(conn, payload)
-    else
-      {:error, :operator_token_not_configured} ->
-        error_response(conn, 503, "operator_token_not_configured", "Operator token is not configured")
-
-      {:error, :operator_token_invalid} ->
-        error_response(conn, 403, "operator_token_invalid", "Operator token is invalid")
-
-      {:error, :guardrails_disabled} ->
-        error_response(conn, 409, "guardrails_disabled", "Guardrails are disabled in the current workflow")
-
-      {:error, :operator_action_rate_limited} ->
-        error_response(conn, 409, "operator_action_rate_limited", "Another operator action just updated this item")
-
-      {:error, reason} ->
-        error_response(conn, 409, "guardrail_override_failed", "Failed to enable run full access: #{inspect(reason)}")
-    end
+    _ = {run_id, params}
+    approval_controls_unsupported_response(conn)
   end
 
   @spec disable_run_full_access(Conn.t(), map()) :: Conn.t()
   def disable_run_full_access(conn, %{"run_id" => run_id} = params) do
-    with :ok <- authorize_operator(params, conn),
-         {:ok, payload} <-
-           Orchestrator.disable_full_access_for_run(
-             orchestrator(),
-             run_id,
-             actor: params["actor"] || "api",
-             reason: params["reason"]
-           ) do
-      json(conn, payload)
-    else
-      {:error, :operator_token_not_configured} ->
-        error_response(conn, 503, "operator_token_not_configured", "Operator token is not configured")
-
-      {:error, :operator_token_invalid} ->
-        error_response(conn, 403, "operator_token_invalid", "Operator token is invalid")
-
-      {:error, :guardrails_disabled} ->
-        error_response(conn, 409, "guardrails_disabled", "Guardrails are disabled in the current workflow")
-
-      {:error, :override_not_found} ->
-        error_response(conn, 404, "override_not_found", "Run override not found")
-
-      {:error, :operator_action_rate_limited} ->
-        error_response(conn, 409, "operator_action_rate_limited", "Another operator action just updated this item")
-
-      {:error, reason} ->
-        error_response(conn, 409, "guardrail_override_failed", "Failed to disable run full access: #{inspect(reason)}")
-    end
+    _ = {run_id, params}
+    approval_controls_unsupported_response(conn)
   end
 
   @spec enable_workflow_full_access(Conn.t(), map()) :: Conn.t()
   def enable_workflow_full_access(conn, params) do
-    with :ok <- authorize_operator(params, conn),
-         {:ok, payload} <-
-           Orchestrator.enable_full_access_for_workflow(
-             orchestrator(),
-             actor: params["actor"] || "api",
-             reason: params["reason"]
-           ) do
-      json(conn, payload)
-    else
-      {:error, :operator_token_not_configured} ->
-        error_response(conn, 503, "operator_token_not_configured", "Operator token is not configured")
-
-      {:error, :operator_token_invalid} ->
-        error_response(conn, 403, "operator_token_invalid", "Operator token is invalid")
-
-      {:error, :guardrails_disabled} ->
-        error_response(conn, 409, "guardrails_disabled", "Guardrails are disabled in the current workflow")
-
-      {:error, :operator_action_rate_limited} ->
-        error_response(conn, 409, "operator_action_rate_limited", "Another operator action just updated this item")
-
-      {:error, reason} ->
-        error_response(conn, 409, "guardrail_override_failed", "Failed to enable workflow full access: #{inspect(reason)}")
-    end
+    _ = params
+    approval_controls_unsupported_response(conn)
   end
 
   @spec disable_workflow_full_access(Conn.t(), map()) :: Conn.t()
   def disable_workflow_full_access(conn, params) do
-    with :ok <- authorize_operator(params, conn),
-         {:ok, payload} <-
-           Orchestrator.disable_full_access_for_workflow(
-             orchestrator(),
-             actor: params["actor"] || "api",
-             reason: params["reason"]
-           ) do
-      json(conn, payload)
-    else
-      {:error, :operator_token_not_configured} ->
-        error_response(conn, 503, "operator_token_not_configured", "Operator token is not configured")
-
-      {:error, :operator_token_invalid} ->
-        error_response(conn, 403, "operator_token_invalid", "Operator token is invalid")
-
-      {:error, :guardrails_disabled} ->
-        error_response(conn, 409, "guardrails_disabled", "Guardrails are disabled in the current workflow")
-
-      {:error, :override_not_found} ->
-        error_response(conn, 404, "override_not_found", "Workflow override not found")
-
-      {:error, :operator_action_rate_limited} ->
-        error_response(conn, 409, "operator_action_rate_limited", "Another operator action just updated this item")
-
-      {:error, reason} ->
-        error_response(conn, 409, "guardrail_override_failed", "Failed to disable workflow full access: #{inspect(reason)}")
-    end
+    _ = params
+    approval_controls_unsupported_response(conn)
   end
 
   @spec method_not_allowed(Conn.t(), map()) :: Conn.t()
@@ -709,6 +550,15 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
     conn
     |> put_status(status)
     |> json(%{error: %{code: code, message: message}})
+  end
+
+  defp approval_controls_unsupported_response(conn) do
+    error_response(
+      conn,
+      410,
+      "approval_controls_unsupported",
+      "Codex approval controls are disabled in container-boundary mode"
+    )
   end
 
   defp parse_positive_integer(nil), do: nil
@@ -788,20 +638,6 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
 
   defp secure_token_match?(_expected, _actual), do: false
 
-  defp filter_pending_approvals(approvals, params) when is_list(approvals) and is_map(params) do
-    approvals
-    |> Enum.filter(fn approval ->
-      filter_match?(approval, :issue_identifier, params["issue_identifier"]) and
-        filter_match?(approval, :action_type, params["action_type"]) and
-        filter_match?(approval, :risk_level, params["risk_level"]) and
-        filter_match?(approval, :worker_host, params["worker_host"]) and
-        filter_match?(approval, :run_id, params["run_id"]) and
-        query_match?(approval, params["q"])
-    end)
-  end
-
-  defp filter_pending_approvals(approvals, _params), do: approvals
-
   defp filter_guardrail_rules(rules, params) when is_list(rules) and is_map(params) do
     rules
     |> Enum.filter(fn rule ->
@@ -812,17 +648,6 @@ defmodule SymphonyElixirWeb.ObservabilityApiController do
   end
 
   defp filter_guardrail_rules(rules, _params), do: rules
-
-  defp filter_guardrail_overrides(overrides, params) when is_list(overrides) and is_map(params) do
-    overrides
-    |> Enum.filter(fn override ->
-      filter_match?(override, :scope, params["scope"]) and
-        filter_match?(override, :scope_key, params["scope_key"]) and
-        query_match?(override, params["q"])
-    end)
-  end
-
-  defp filter_guardrail_overrides(overrides, _params), do: overrides
 
   defp decorate_guardrail_rule(rule) when is_map(rule) do
     case Rule.from_snapshot(rule) do

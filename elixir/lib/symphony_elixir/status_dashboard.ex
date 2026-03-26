@@ -394,12 +394,12 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_project_link_lines do
     tracker = Config.settings!().tracker
-    
+
     project_part =
       case tracker.kind do
         "linear" when is_binary(tracker.project_slug) and tracker.project_slug != "" ->
           colorize(linear_project_url(tracker.project_slug), @ansi_cyan)
-          
+
         "github" when is_binary(tracker.owner) and is_binary(tracker.project_number) ->
           colorize(github_project_url(tracker.owner, tracker.project_number), @ansi_cyan)
 
@@ -1114,6 +1114,7 @@ defmodule SymphonyElixir.StatusDashboard do
   defp humanize_codex_event(:turn_input_required, _message, _payload), do: "turn blocked: waiting for user input"
   defp humanize_codex_event(:approval_required, _message, payload), do: humanize_guardrail_review(payload)
   defp humanize_codex_event(:approval_denied, _message, payload), do: humanize_guardrail_denial(payload)
+  defp humanize_codex_event(:approval_unsupported_in_container_boundary, _message, _payload), do: "turn failed: container-boundary mode does not support Codex approval requests"
 
   defp humanize_codex_event(:approval_auto_approved, message, payload) do
     method =

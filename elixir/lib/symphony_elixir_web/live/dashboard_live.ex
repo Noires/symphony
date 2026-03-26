@@ -386,7 +386,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <% :overview -> %>
             <%= overview_page(assigns) %>
           <% :approvals -> %>
-            <%= approvals_page(assigns) %>
+            <%= if approval_controls_supported?() do %>
+              <%= approvals_page(assigns) %>
+            <% else %>
+              <%= approval_controls_unavailable_page(assigns) %>
+            <% end %>
           <% :settings -> %>
             <%= settings_page(assigns) %>
           <% :runs -> %>
@@ -402,14 +406,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
     <section class="stack-lg">
       <%!-- Full width: Attention cards --%>
       <section class="attention-grid" aria-label="Attention now">
-        <article class={attention_card_class(@payload.counts.pending_approvals > 0)}>
-          <p class="attention-kicker">Urgent approvals</p>
-          <h2 class="attention-title"><%= @payload.counts.pending_approvals %> waiting</h2>
-          <p class="attention-copy">
-            <%= first_pending_summary(@filtered_approvals || @payload.pending_approvals) %>
-          </p>
-          <.link patch={page_path(:approvals)} class="inline-link">Open approvals queue</.link>
-        </article>
+        <%= if approval_controls_supported?() do %>
+          <article class={attention_card_class(@payload.counts.pending_approvals > 0)}>
+            <p class="attention-kicker">Urgent approvals</p>
+            <h2 class="attention-title"><%= @payload.counts.pending_approvals %> waiting</h2>
+            <p class="attention-copy">
+              <%= first_pending_summary(@filtered_approvals || @payload.pending_approvals) %>
+            </p>
+            <.link patch={page_path(:approvals)} class="inline-link">Open approvals queue</.link>
+          </article>
+        <% end %>
 
         <article class={attention_card_class(@payload.counts.retrying > 0)}>
           <p class="attention-kicker">Retry pressure</p>
@@ -418,12 +424,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <a href="#retry-queue" class="inline-link">Inspect retry queue</a>
         </article>
 
-        <article class={attention_card_class(@payload.counts.active_overrides > 0)}>
-          <p class="attention-kicker">Safety posture</p>
-          <h2 class="attention-title"><%= @payload.counts.active_overrides %> active overrides</h2>
-          <p class="attention-copy"><%= override_summary(@payload.guardrail_overrides) %></p>
-          <.link patch={page_path(:approvals)} class="inline-link">Review full access posture</.link>
-        </article>
+        <%= if approval_controls_supported?() do %>
+          <article class={attention_card_class(@payload.counts.active_overrides > 0)}>
+            <p class="attention-kicker">Safety posture</p>
+            <h2 class="attention-title"><%= @payload.counts.active_overrides %> active overrides</h2>
+            <p class="attention-copy"><%= override_summary(@payload.guardrail_overrides) %></p>
+            <.link patch={page_path(:approvals)} class="inline-link">Review full access posture</.link>
+          </article>
+        <% end %>
       </section>
 
       <%!-- Full width: Running sessions --%>
@@ -548,28 +556,30 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <% end %>
       </DashboardComponents.section_frame>
 
-      <DashboardComponents.section_frame
-        kicker="Pending approvals"
-        title="Queue preview"
-        copy="Highest-risk approvals waiting for operator review."
-        collapsible={true}
-        open={@payload.pending_approvals != []}
-      >
-        <%= if @payload.pending_approvals == [] do %>
-          <DashboardComponents.empty_state title="Approval queue clear" copy="No guardrail actions are blocked right now." />
-        <% else %>
-          <ul class="stack-sm card-list">
-            <li :for={approval <- Enum.take(sort_approvals(@payload.pending_approvals), 4)} class="list-card">
-              <div class="list-card-head">
-                <strong><%= approval.issue_identifier %></strong>
-                <span class={state_badge_class(approval.risk_level || "review")}><%= approval.risk_level || "review" %></span>
-              </div>
-              <p class="list-card-copy"><%= approval.summary || "approval pending operator review" %></p>
-              <.link patch={page_path(:approvals, %{"selected" => approval.id})} class="inline-link">Inspect approval</.link>
-            </li>
-          </ul>
-        <% end %>
-      </DashboardComponents.section_frame>
+      <%= if approval_controls_supported?() do %>
+        <DashboardComponents.section_frame
+          kicker="Pending approvals"
+          title="Queue preview"
+          copy="Highest-risk approvals waiting for operator review."
+          collapsible={true}
+          open={@payload.pending_approvals != []}
+        >
+          <%= if @payload.pending_approvals == [] do %>
+            <DashboardComponents.empty_state title="Approval queue clear" copy="No guardrail actions are blocked right now." />
+          <% else %>
+            <ul class="stack-sm card-list">
+              <li :for={approval <- Enum.take(sort_approvals(@payload.pending_approvals), 4)} class="list-card">
+                <div class="list-card-head">
+                  <strong><%= approval.issue_identifier %></strong>
+                  <span class={state_badge_class(approval.risk_level || "review")}><%= approval.risk_level || "review" %></span>
+                </div>
+                <p class="list-card-copy"><%= approval.summary || "approval pending operator review" %></p>
+                <.link patch={page_path(:approvals, %{"selected" => approval.id})} class="inline-link">Inspect approval</.link>
+              </li>
+            </ul>
+          <% end %>
+        </DashboardComponents.section_frame>
+      <% end %>
     </section>
     """
   end
@@ -698,6 +708,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <%= active_overrides_panel(assigns) %>
       <%= guardrail_rules_panel(assigns) %>
     </section>
+    """
+  end
+
+  defp approval_controls_unavailable_page(assigns) do
+    ~H"""
+    <DashboardComponents.section_frame
+      kicker="Container boundary"
+      title="Approval controls are unavailable"
+      copy="Docker mode uses the container as the execution boundary, so Codex command/file approval and full-access override controls are disabled."
+    >
+      <DashboardComponents.empty_state
+        title="Use workflow-state review instead"
+        copy="Human Review and Merging remain the operator approval gates for Docker runs. Continue from the runs view or inspect settings and rules without in-run approval controls."
+        action_label="Open runs"
+        action_href="/runs"
+      />
+    </DashboardComponents.section_frame>
     """
   end
 
@@ -1163,33 +1190,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
     """
   end
 
-  defp operator_access_panel(assigns) do
-    ~H"""
-    <DashboardComponents.section_frame
-      kicker="Operator control"
-      title="Operator access"
-      copy="Enter the operator token once for this browser tab. It stays in LiveView state only and is never persisted."
-    >
-      <section class="split-grid-tight">
-        <form phx-change="update_operator_token" class="stack-sm">
-          <div class="field-group">
-            <label for="dashboard-operator-token" class="field-label">Operator token</label>
-            <input id="dashboard-operator-token" type="password" name="operator_token" value={@operator_token} autocomplete="current-password" class="field-input" />
-          </div>
-        </form>
-
-        <DashboardComponents.key_value_list
-          items={[
-            %{label: "Status", value: if(@operator_authenticated, do: "authenticated", else: "token required")},
-            %{label: "Configured", value: yes_no_label(operator_token_configured?())},
-            %{label: "Storage", value: "LiveView session state only"}
-          ]}
-        />
-      </section>
-    </DashboardComponents.section_frame>
-    """
-  end
-
   defp approval_detail(assigns) do
     ~H"""
     <%= if @selected_approval do %>
@@ -1432,9 +1432,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
       key: :overview,
       nav_label: "Overview",
       title: "Operations Dashboard",
-      copy: "A triage-first control surface for live execution, retry pressure, and the approvals queue.",
+      copy:
+        if(
+          approval_controls_supported?(),
+          do: "A triage-first control surface for live execution, retry pressure, and the approvals queue.",
+          else: "A triage-first control surface for live execution, retry pressure, and hardened container health."
+        ),
       focus: "What needs attention now, without losing the full operational picture.",
-      next_step: "Clear operator-blocked work first, then inspect retries and active sessions."
+      next_step:
+        if(
+          approval_controls_supported?(),
+          do: "Clear operator-blocked work first, then inspect retries and active sessions.",
+          else: "Inspect retries and active sessions first, then use Human Review or Merging as the approval gates."
+        )
     }
   end
 
@@ -1442,10 +1452,25 @@ defmodule SymphonyElixirWeb.DashboardLive do
     %{
       key: :approvals,
       nav_label: "Approvals",
-      title: "Approval Control",
-      copy: "Resolve blocked runs, manage full-access posture, and keep guardrail rules predictable.",
-      focus: "Pending operator decisions, temporary overrides, and long-lived rules.",
-      next_step: "Clear waiting approvals first, then remove stale overrides and tighten rules."
+      title: if(approval_controls_supported?(), do: "Approval Control", else: "Approval Controls Unavailable"),
+      copy:
+        if(
+          approval_controls_supported?(),
+          do: "Resolve blocked runs, manage full-access posture, and keep guardrail rules predictable.",
+          else: "Docker mode treats the container as the execution boundary, so Codex approval and full-access controls are disabled."
+        ),
+      focus:
+        if(
+          approval_controls_supported?(),
+          do: "Pending operator decisions, temporary overrides, and long-lived rules.",
+          else: "Use workflow-state review instead of in-run Codex approvals."
+        ),
+      next_step:
+        if(
+          approval_controls_supported?(),
+          do: "Clear waiting approvals first, then remove stale overrides and tighten rules.",
+          else: "Move work through Human Review and Merging, then inspect run history from the runs view."
+        )
     }
   end
 
@@ -1487,44 +1512,25 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
     [
       %{label: "Overview", patch: page_path(:overview), current: page.key == :overview, meta: counts.running},
-      %{label: "Approvals", patch: page_path(:approvals), current: page.key == :approvals, meta: counts.pending_approvals},
       %{label: "Settings", patch: page_path(:settings), current: page.key == :settings, meta: ui_override_count(payload)},
       %{label: "Runs", patch: page_path(:runs), current: page.key == :runs, meta: counts.completed_runs}
     ]
+    |> maybe_insert_approvals_nav(page, counts)
   end
 
   defp utility_items(:overview), do: [%{label: "State API", href: "/api/v1/state"}, %{label: "Rollups API", href: "/api/v1/rollups"}]
-  defp utility_items(:approvals), do: [%{label: "Approvals API", href: "/api/v1/guardrails/approvals"}, %{label: "Rules API", href: "/api/v1/guardrails/rules"}]
-  defp utility_items(:settings), do: [%{label: "Settings API", href: "/api/v1/settings"}, %{label: "GitHub API", href: "/api/v1/github"}]
-  defp utility_items(:runs), do: [%{label: "State API", href: "/api/v1/state"}, %{label: "Rollups API", href: "/api/v1/rollups"}]
-  defp utility_items(_page), do: utility_items(:overview)
 
-  defp page_header_actions(page, payload) do
-    counts = payload_counts(payload)
-
-    case page.key do
-      :overview ->
-        [%{label: "Open approvals", patch: page_path(:approvals), primary: counts.pending_approvals > 0}, %{label: "Run explorer", patch: page_path(:runs)}]
-
-      :approvals ->
-        [%{label: "Guardrail API", href: "/api/v1/guardrails/approvals"}, %{label: "Safety posture", patch: page_path(:settings)}]
-
-      :settings ->
-        [%{label: "Settings API", href: "/api/v1/settings"}, %{label: "GitHub API", href: "/api/v1/github"}]
-
-      :runs ->
-        [%{label: "Expensive runs", patch: page_path(:runs, %{"view" => "expensive"})}, %{label: "Issue efficiency", patch: page_path(:runs, %{"view" => "rollups"})}]
+  defp utility_items(:approvals) do
+    if approval_controls_supported?() do
+      [%{label: "Approvals API", href: "/api/v1/guardrails/approvals"}, %{label: "Rules API", href: "/api/v1/guardrails/rules"}]
+    else
+      [%{label: "Rules API", href: "/api/v1/guardrails/rules"}, %{label: "Runs", href: "/runs"}]
     end
   end
 
-  defp page_header_meta(page, payload, now) do
-    [
-      %{label: "Generated", value: payload.generated_at || DateTime.to_iso8601(now)},
-      %{label: "Storage", value: Map.get(payload, :storage_backend, "n/a")},
-      %{label: "Focus", value: page.focus},
-      %{label: "Next step", value: page.next_step}
-    ]
-  end
+  defp utility_items(:settings), do: [%{label: "Settings API", href: "/api/v1/settings"}, %{label: "GitHub API", href: "/api/v1/github"}]
+  defp utility_items(:runs), do: [%{label: "State API", href: "/api/v1/state"}, %{label: "Rollups API", href: "/api/v1/rollups"}]
+  defp utility_items(_page), do: utility_items(:overview)
 
   defp load_payload do
     Presenter.state_payload(orchestrator(), snapshot_timeout_ms())
@@ -1590,11 +1596,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp rebuild_page_state(socket, params) do
     payload = socket.assigns.payload
     guardrail_filters = normalize_guardrail_filters(params)
-    filtered_approvals = filtered_pending_approvals(payload.pending_approvals || [], guardrail_filters)
+    pending_approvals = Map.get(payload, :pending_approvals, [])
+    filtered_approvals = filtered_pending_approvals(pending_approvals, guardrail_filters)
     selected_approval = select_approval(filtered_approvals, guardrail_filters["selected"])
     run_filters = normalize_run_filters(params)
-    filtered_runs = filtered_runs(payload.completed_runs || [], run_filters)
-    filtered_rollups = filtered_rollups(payload.issue_rollups || [], run_filters)
+    filtered_runs = filtered_runs(Map.get(payload, :completed_runs, []), run_filters)
+    filtered_rollups = filtered_rollups(Map.get(payload, :issue_rollups, []), run_filters)
 
     socket
     |> assign(:guardrail_filters, guardrail_filters)
@@ -2170,7 +2177,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     %{running: 0, pending_approvals: 0, retrying: 0, guardrail_rules: 0, active_guardrail_rules: 0, active_overrides: 0, completed_runs: 0, issue_rollups: 0, expensive_runs: 0, cheap_wins: 0}
   end
 
-  defp ui_override_count(payload), do: Enum.count(payload.settings || [], &(&1.source == "ui_override"))
+  defp ui_override_count(payload), do: Enum.count(Map.get(payload, :settings, []), &(&1.source == "ui_override"))
   defp github_override_count(payload), do: Enum.count(get_in(payload, [:github_access, :settings]) || [], &(&1.source == "ui_override"))
   defp sum_run_tokens(_filtered_runs, completed_runs, "rollups"), do: Enum.count(completed_runs || [])
   defp sum_run_tokens(filtered_runs, _completed_runs, _view), do: Enum.reduce(filtered_runs || [], 0, fn run, total -> total + (get_in(run, ["tokens", "total_tokens"]) || 0) end)
@@ -2249,6 +2256,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp humanize_guardrail_error(:approval_not_found), do: "Approval not found."
   defp humanize_guardrail_error(:approval_stale), do: "Approval is no longer pending."
   defp humanize_guardrail_error({:approval_already_resolved, decision}), do: "Approval was already resolved as #{decision}."
+  defp humanize_guardrail_error(:approval_controls_unsupported), do: "Codex approval controls are disabled in container-boundary mode."
   defp humanize_guardrail_error(:override_not_found), do: "Full-access override not found."
   defp humanize_guardrail_error(:rule_not_found), do: "Guardrail rule not found."
   defp humanize_guardrail_error(:operator_action_rate_limited), do: "Another operator action just updated this item. Try again in a moment."
@@ -2341,6 +2349,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
       |> String.downcase()
 
     String.contains?(haystack, normalize_filter_value(query))
+  end
+
+  defp approval_controls_supported? do
+    Config.approval_controls_supported?()
+  end
+
+  defp maybe_insert_approvals_nav(items, page, counts) when is_list(items) do
+    if approval_controls_supported?() do
+      List.insert_at(
+        items,
+        1,
+        %{label: "Approvals", patch: page_path(:approvals), current: page.key == :approvals, meta: counts.pending_approvals}
+      )
+    else
+      items
+    end
   end
 
   defp normalize_filter_value(value) when is_binary(value), do: value |> String.trim() |> String.downcase()

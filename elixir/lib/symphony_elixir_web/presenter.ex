@@ -12,6 +12,7 @@ defmodule SymphonyElixirWeb.Presenter do
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
+        snapshot = strip_approval_controls(snapshot)
         pending_approvals = Map.get(snapshot, :pending_approvals, [])
         active_guardrail_rules = Map.get(snapshot, :guardrail_rules, [])
         guardrail_overrides = Map.get(snapshot, :guardrail_overrides, [])
@@ -91,7 +92,7 @@ defmodule SymphonyElixirWeb.Presenter do
   def issue_payload(issue_identifier, orchestrator, snapshot_timeout_ms) when is_binary(issue_identifier) do
     snapshot =
       case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
-        %{} = snapshot -> snapshot
+        %{} = snapshot -> strip_approval_controls(snapshot)
         _ -> %{running: [], pending_approvals: [], retrying: []}
       end
 
@@ -206,7 +207,7 @@ defmodule SymphonyElixirWeb.Presenter do
     with {:ok, payload} <- run_page_payload(issue_identifier, run_id) do
       snapshot =
         case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
-          %{} = snapshot -> snapshot
+          %{} = snapshot -> strip_approval_controls(snapshot)
           _ -> %{guardrail_overrides: [], guardrail_rules: []}
         end
 
@@ -399,6 +400,7 @@ defmodule SymphonyElixirWeb.Presenter do
       payload: Map.get(pending_approval, :payload),
       review_tags: Map.get(pending_approval.details || %{}, "review_tags") || []
     }
+
     explanation =
       Map.get(pending_approval, :explanation) ||
         Map.get(pending_approval, "explanation") ||
@@ -702,5 +704,11 @@ defmodule SymphonyElixirWeb.Presenter do
       _ ->
         DateTime.utc_now()
     end
+  end
+
+  defp strip_approval_controls(snapshot) when is_map(snapshot) do
+    snapshot
+    |> Map.put(:pending_approvals, [])
+    |> Map.put(:guardrail_overrides, [])
   end
 end

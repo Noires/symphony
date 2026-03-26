@@ -138,8 +138,8 @@ defmodule SymphonyElixir.AppServerTest do
       issue = %Issue{
         id: "issue-supported-turn-policies",
         identifier: "MT-1001",
-        title: "Validate explicit turn sandbox policy passthrough",
-        description: "Ensure runtime startup forwards configured turn sandbox policies unchanged",
+        title: "Validate docker-only turn sandbox policy",
+        description: "Ensure runtime startup ignores workflow sandbox overrides and keeps the fixed container policy",
         state: "In Progress",
         url: "https://example.org/issues/MT-1001",
         labels: ["backend"]
@@ -173,7 +173,7 @@ defmodule SymphonyElixir.AppServerTest do
                    |> Jason.decode!()
                    |> then(fn payload ->
                      payload["method"] == "turn/start" &&
-                       get_in(payload, ["params", "sandboxPolicy"]) == configured_policy
+                       get_in(payload, ["params", "sandboxPolicy"]) == %{"type" => "dangerFullAccess"}
                    end)
                  else
                    false
@@ -264,7 +264,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server fails when command execution approval is required under safer defaults" do
+  test "app server fails when command execution approval is requested" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -318,16 +318,83 @@ defmodule SymphonyElixir.AppServerTest do
         labels: ["backend"]
       }
 
-      assert {:error, {:approval_required, payload}} =
+      assert {:error, {:approval_unsupported_in_container_boundary, details}} =
                AppServer.run(workspace, "Handle approval request", issue)
 
-      assert payload["method"] == "item/commandExecution/requestApproval"
+      assert details.method == "item/commandExecution/requestApproval"
+      assert details.reason == "container-boundary mode does not support Codex approval requests"
     after
       File.rm_rf(test_root)
     end
   end
 
-  test "app server auto-approves command execution approval requests when approval policy is never" do
+  test "app server fails cleanly when approval is requested in container-boundary mode" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-container-boundary-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-89")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-89"}}}'
+            ;;
+          3)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-89"}}}'
+            printf '%s\\n' '{"id":99,"method":"item/commandExecution/requestApproval","params":{"command":"gh pr view","cwd":"/tmp","reason":"need approval"}}'
+            ;;
+          *)
+            sleep 1
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_approval_policy: "on-request"
+      )
+
+      issue = %Issue{
+        id: "issue-approval-container-boundary",
+        identifier: "MT-89",
+        title: "Approval required",
+        description: "Ensure container-boundary mode fails instead of pausing for approval",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-89",
+        labels: ["backend"]
+      }
+
+      assert {:error, {:approval_unsupported_in_container_boundary, details}} =
+               AppServer.run(workspace, "Handle approval request", issue)
+
+      assert details.method == "item/commandExecution/requestApproval"
+      assert details.reason == "container-boundary mode does not support Codex approval requests"
+      assert is_map(details.explanation)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server fails command execution approval requests even when workflow sets approval policy never" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -393,16 +460,20 @@ defmodule SymphonyElixir.AppServerTest do
       )
 
       issue = %Issue{
-        id: "issue-auto-approve",
+        id: "issue-no-auto-approve",
         identifier: "MT-89",
-        title: "Auto approve request",
-        description: "Ensure app-server approval requests are handled automatically",
+        title: "No auto approve request",
+        description: "Ensure app-server approval requests fail even when workflow config asks for never",
         state: "In Progress",
         url: "https://example.org/issues/MT-89",
         labels: ["backend"]
       }
 
-      assert {:ok, _result} = AppServer.run(workspace, "Handle approval request", issue)
+      assert {:error, {:approval_unsupported_in_container_boundary, details}} =
+               AppServer.run(workspace, "Handle approval request", issue)
+
+      assert details.method == "item/commandExecution/requestApproval"
+      assert details.reason == "container-boundary mode does not support Codex approval requests"
 
       trace = File.read!(trace_file)
       lines = String.split(trace, "\n", trim: true)
@@ -447,14 +518,14 @@ defmodule SymphonyElixir.AppServerTest do
                end
              end)
 
-      assert Enum.any?(lines, fn line ->
+      refute Enum.any?(lines, fn line ->
                if String.starts_with?(line, "JSON:") do
                  payload =
                    line
                    |> String.trim_leading("JSON:")
                    |> Jason.decode!()
 
-                 payload["id"] == 99 and get_in(payload, ["result", "decision"]) == "acceptForSession"
+                 payload["id"] == 99 and match?(%{"decision" => _}, payload["result"])
                else
                  false
                end
@@ -464,7 +535,7 @@ defmodule SymphonyElixir.AppServerTest do
     end
   end
 
-  test "app server auto-approves MCP tool approval prompts when approval policy is never" do
+  test "app server answers MCP tool approval prompts with the non-interactive fallback" do
     test_root =
       Path.join(
         System.tmp_dir!(),
@@ -553,7 +624,7 @@ defmodule SymphonyElixir.AppServerTest do
 
                  payload["id"] == 110 and
                    get_in(payload, ["result", "answers", "mcp_tool_call_approval_call-717", "answers"]) ==
-                     ["Approve this Session"]
+                     ["This is a non-interactive session. Operator input is unavailable."]
                else
                  false
                end
@@ -1365,14 +1436,7 @@ defmodule SymphonyElixir.AppServerTest do
       assert argv_line =~ "exec "
       assert argv_line =~ "fake-remote-codex app-server"
 
-      expected_turn_policy = %{
-        "type" => "workspaceWrite",
-        "writableRoots" => [remote_workspace],
-        "readOnlyAccess" => %{"type" => "fullAccess"},
-        "networkAccess" => false,
-        "excludeTmpdirEnvVar" => false,
-        "excludeSlashTmp" => false
-      }
+      expected_turn_policy = %{"type" => "dangerFullAccess"}
 
       assert Enum.any?(lines, fn line ->
                if String.starts_with?(line, "JSON:") do

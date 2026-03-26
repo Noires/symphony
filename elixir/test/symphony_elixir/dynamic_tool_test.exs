@@ -50,6 +50,8 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            ] = DynamicTool.tool_specs()
 
     assert description =~ "Trello"
+    assert description =~ "/cards/{cardId}/actions/comments"
+    assert description =~ "PUT /actions/{actionId}"
   end
 
   test "tool_specs advertises GitHub GraphQL and REST contracts when tracker.kind=github" do

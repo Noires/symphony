@@ -13,15 +13,13 @@ tracker:
 workspace:
   root: /workspaces
 hooks:
+  timeout_ms: 300000
   after_create: |
     repo_url="${SYMPHONY_SOURCE_REPO_URL:-https://github.com/Noires/light-archives.git}"
     git clone --depth 1 "$repo_url" .
 
     git config user.name "${GIT_AUTHOR_NAME:-Symphony}"
     git config user.email "${GIT_AUTHOR_EMAIL:-symphony@local.invalid}"
-    cd server && yarn install --frozen-lockfile
-    cd ../client && yarn install --frozen-lockfile
-    cd ../news && yarn install --frozen-lockfile
   after_success: |
     if [ "$SYMPHONY_ISSUE_STATE" = "Merging" ]; then
       git config --global --add safe.directory "$PWD"
@@ -63,8 +61,6 @@ guardrails:
   operator_token: $SYMPHONY_OPERATOR_TOKEN
 codex:
   command: codex app-server
-  approval_policy: never
-  thread_sandbox: workspace-write
 server:
   host: 0.0.0.0
 ---
@@ -88,9 +84,10 @@ Rules:
 1. Use the injected `trello_api` tool for Trello reads and writes.
 2. Treat the current list name as the workflow state.
 3. `KI` is the intake list. Move the card to `In Progress` before implementation work starts.
-4. Keep one persistent comment headed `## Codex Workpad` on the card and update it in place.
+4. Keep one persistent comment headed `## Codex Workpad` on the card and update it in place. Add a card comment with `POST /cards/{cardId}/actions/comments` and `text`; edit an existing comment action with `PUT /actions/{actionId}` and `text`.
+5. This Docker workflow uses the container as the execution boundary. Do not rely on Codex approval or full-access controls inside the run; use workflow state changes such as `Human Review` and `Merging` instead.
 5. Do not start the backend, Redis, MariaDB, Docker Compose, or other local infrastructure for now unless a human explicitly changes this workflow.
-6. Prefer code inspection, static changes, and validations that do not require the backend to be running locally.
+6. Prefer code inspection, static changes, and validations that do not require the backend to be running locally. Install project dependencies only when the task actually needs them.
 7. Leave the card ready for `Human Review` once code, validation, and push are complete; Symphony will move it there after a successful run.
 8. If review requests changes, move the card to `Rework`.
 9. When approved, move the card to `Merging`. Use that run to leave the workspace ready for landing; Symphony will push from `main` to `origin/main` after a successful run and then move the card to `Done`.

@@ -19,12 +19,20 @@ services:
       GIT_AUTHOR_EMAIL: ${GIT_AUTHOR_EMAIL:-symphony@local.invalid}
       GIT_COMMITTER_NAME: ${GIT_COMMITTER_NAME:-Symphony}
       GIT_COMMITTER_EMAIL: ${GIT_COMMITTER_EMAIL:-symphony@local.invalid}
+      HOME: /home/symphony
     volumes:
       - ${SYMPHONY_WORKFLOW_FILE:-./WORKFLOW.trello.docker.md}:/run/symphony/WORKFLOW.md:ro
       - symphony_workspaces:/workspaces
       - symphony_logs:/logs
-      - symphony_codex_home:/root/.codex
+      - symphony_home:/home/symphony
     working_dir: /app
+    read_only: true
+    tmpfs:
+      - /tmp:mode=1777,exec
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
     restart: unless-stopped
     command:
       [
@@ -38,6 +46,6 @@ services:
       ]
 
 volumes:
-  symphony_codex_home:
+  symphony_home:
   symphony_workspaces:
   symphony_logs:

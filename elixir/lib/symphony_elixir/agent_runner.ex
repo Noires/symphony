@@ -21,30 +21,18 @@ defmodule SymphonyElixir.AgentRunner do
         :ok ->
           :ok
 
-        {:approval_pending, approval_request} ->
-          exit({:approval_pending, approval_request})
-
-        {:approval_denied, approval_request} ->
-          exit({:approval_denied, approval_request})
+        {:error, {:approval_unsupported_in_container_boundary, details}} ->
+          exit({:approval_unsupported_in_container_boundary, details})
 
         {:error, reason} ->
           Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
           raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
       end
     catch
-      :exit, {:approval_pending, approval_request} ->
-        Logger.info(
-          "Agent run paused for approval for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} approval=#{inspect(Map.take(approval_request, [:action_type, :method, :summary]))}"
-        )
+      :exit, {:approval_unsupported_in_container_boundary, details} ->
+        Logger.warning("Agent run hit unsupported approval request in container-boundary mode for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} details=#{inspect(details)}")
 
-        :erlang.raise(:exit, {:approval_pending, approval_request}, __STACKTRACE__)
-
-      :exit, {:approval_denied, approval_request} ->
-        Logger.warning(
-          "Agent run denied by policy for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)} approval=#{inspect(Map.take(approval_request, [:action_type, :method, :summary]))}"
-        )
-
-        :erlang.raise(:exit, {:approval_denied, approval_request}, __STACKTRACE__)
+        :erlang.raise(:exit, {:approval_unsupported_in_container_boundary, details}, __STACKTRACE__)
 
       kind, reason ->
         Logger.error(

@@ -34,9 +34,17 @@ COPY README.md ./
 
 RUN mix deps.compile && mix build
 
-RUN mkdir -p /root/.codex /run/symphony /workspaces /logs \
+RUN groupadd --system symphony \
+ && useradd --system --gid symphony --create-home --home-dir /home/symphony --shell /bin/bash symphony \
+ && mkdir -p /home/symphony/.codex /run/symphony /workspaces /logs \
+ && chown -R symphony:symphony /home/symphony /run/symphony /workspaces /logs \
  && install -m 0755 ./scripts/symphony-git-credential-helper.sh /usr/local/bin/symphony-git-credential-helper \
- && git config --global credential.helper /usr/local/bin/symphony-git-credential-helper \
- && git config --global credential.useHttpPath true
+ && git config --system credential.helper /usr/local/bin/symphony-git-credential-helper \
+ && git config --system credential.useHttpPath true
+
+ENV HOME=/home/symphony \
+    XDG_CONFIG_HOME=/home/symphony/.config
+
+USER symphony
 
 CMD ["./bin/symphony", "--i-understand-that-this-will-be-running-without-the-usual-guardrails", "--logs-root", "/logs", "--port", "4000", "/run/symphony/WORKFLOW.md"]

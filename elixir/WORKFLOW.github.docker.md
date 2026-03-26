@@ -266,8 +266,6 @@ guardrails:
   operator_token: $SYMPHONY_OPERATOR_TOKEN
 codex:
   command: codex app-server
-  approval_policy: never
-  thread_sandbox: workspace-write
 server:
   host: 0.0.0.0
 ---
@@ -285,6 +283,8 @@ Description:
 {% else %}
 No description provided.
 {% endif %}
+
+This Docker workflow uses the container as the execution boundary. Do not rely on Codex approval or full-access controls inside the run; use workflow state changes such as `Human Review` and `Merging` instead.
 
 Rules:
 

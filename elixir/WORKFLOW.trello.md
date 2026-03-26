@@ -80,7 +80,7 @@ Rules:
 1. Use the injected `trello_api` tool for Trello reads and writes.
 2. Treat the current list name as the workflow state.
 3. `KI` is the intake list. Move the card to `In Progress` before implementation work starts.
-4. Keep one persistent comment headed `## Codex Workpad` on the card and update it in place.
+4. Keep one persistent comment headed `## Codex Workpad` on the card and update it in place. Add a card comment with `POST /cards/{cardId}/actions/comments` and `text`; edit an existing comment action with `PUT /actions/{actionId}` and `text`.
 5. Do not start the backend, Redis, MariaDB, Docker Compose, or other local infrastructure for now unless a human explicitly changes this workflow.
 6. Prefer code inspection, static changes, and validations that do not require the backend to be running locally.
 7. Leave the card ready for `Human Review` once code, validation, and push are complete; Symphony will move it there after a successful run.

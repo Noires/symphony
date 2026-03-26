@@ -918,6 +918,42 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  test "docker-only runtime forces fixed Codex runtime settings" do
+    explicit_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-container-boundary-root-#{System.unique_integer([:positive])}"
+      )
+
+    explicit_workspace = Path.join(explicit_root, "MT-CONTAINER")
+    explicit_cache = Path.join(explicit_workspace, "cache")
+    File.mkdir_p!(explicit_cache)
+
+    on_exit(fn -> File.rm_rf(explicit_root) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      workspace_root: explicit_root,
+      codex_approval_policy: "on-request",
+      codex_thread_sandbox: "workspace-write",
+      codex_turn_sandbox_policy: %{
+        type: "workspaceWrite",
+        writableRoots: [explicit_workspace, explicit_cache]
+      }
+    )
+
+    assert Config.execution_boundary() == "container"
+    assert Config.container_boundary_mode?()
+    refute Config.approval_controls_supported?()
+
+    assert {:ok, docker_runtime} = Config.codex_runtime_settings(explicit_workspace)
+
+    assert docker_runtime == %{
+             approval_policy: "never",
+             thread_sandbox: "danger-full-access",
+             turn_sandbox_policy: %{"type" => "dangerFullAccess"}
+           }
+  end
+
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"

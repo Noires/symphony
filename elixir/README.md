@@ -8,9 +8,8 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 > We recommend implementing your own hardened version based on `SPEC.md`.
 
 > [!IMPORTANT]
-> Linux containers are the primary supported runtime for Symphony Elixir. The Docker workflows in
-> this directory are the recommended default. Host-local runs remain available for development and
-> debugging, but should be treated as a secondary fallback, especially on Windows.
+> Linux containers are the only supported runtime for Symphony Elixir. The Docker workflows in
+> this directory are the supported deployment path.
 
 ## Dashboard
 
@@ -57,19 +56,16 @@ During app-server sessions, Symphony also serves a tracker-specific client-side 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.
 
-## Recommended runtime
+## Runtime model
 
-Use Symphony in Docker on a Linux container runtime by default.
+Run Symphony in Docker on a Linux container runtime.
 
-Why this is the preferred mode:
+Why this is the supported mode:
 
 - reproducible Elixir, Git, Node, and Codex runtime
-- fewer shell and path inconsistencies than host-local Windows runs
-- cleaner workspace isolation and safer operator guardrails
+- fewer shell and path inconsistencies
+- cleaner workspace isolation and safer operator boundaries
 - closer to the environment you will likely use in CI or on a server
-
-Use a host-local run only when you explicitly want to debug the local Elixir runtime, iterate on
-the implementation without rebuilding the image, or inspect host-specific behavior.
 
 ## How to use it
 
@@ -78,17 +74,13 @@ the implementation without rebuilding the image, or inspect host-specific behavi
 2. Choose a tracker workflow:
    - Trello in Docker: [WORKFLOW.trello.docker.md](WORKFLOW.trello.docker.md)
    - GitHub Projects v2 in Docker: [WORKFLOW.github.docker.md](WORKFLOW.github.docker.md)
-   - host-local fallback workflows: [WORKFLOW.trello.md](WORKFLOW.trello.md),
-     [WORKFLOW.trello.guardrails.md](WORKFLOW.trello.guardrails.md), and
-     [WORKFLOW.github.md](WORKFLOW.github.md)
 3. Provide tracker credentials:
    - Linear: create a personal token in Settings -> Security & access -> Personal API keys and set
      `LINEAR_API_KEY`
    - Trello: set `TRELLO_API_KEY`, `TRELLO_API_TOKEN`, and `TRELLO_BOARD_ID`
    - GitHub: set `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, and `GITHUB_PROJECT_NUMBER`
-   - Guarded operator mode: also set `SYMPHONY_OPERATOR_TOKEN`
-4. Copy this directory's `WORKFLOW.md` to your repo if you are running host-local, or use the
-   provided Docker workflow files directly with Compose.
+   - Operator-authenticated admin actions: also set `SYMPHONY_OPERATOR_TOKEN`
+4. Use the provided Docker workflow files directly with Compose.
 5. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
@@ -129,14 +121,18 @@ The compose stack mounts:
 - `./.env` into the container so Trello credentials still auto-load next to the workflow file
 - a named Docker volume for issue workspaces at `/workspaces`
 - a named Docker volume for Symphony logs at `/logs`
-- a named Docker volume for Codex auth at `/root/.codex`
+- a named Docker volume for the runtime home directory at `/home/symphony`
 
 This means the workspaces and logs stay persistent across container recreation, but they do not need
 to live in a host checkout folder.
 
+Docker mode treats the container as the primary execution boundary. Symphony forces Codex to run
+without in-run approval/resume mechanics in this mode, so operator approvals happen through the
+workflow states (`Human Review`, `Merging`) instead of Codex command/file prompts.
+
 The dashboard is exposed on port `4000` by default.
 
-## Host-local prerequisites
+## Developer prerequisites
 
 We recommend using [mise](https://mise.jdx.dev/) to manage Elixir/Erlang versions.
 
@@ -145,38 +141,15 @@ mise install
 mise exec -- elixir --version
 ```
 
-## Run locally (fallback)
-
-Use this mode when you intentionally want a host-local Elixir process. Docker remains the preferred
-default.
-
-```bash
-git clone https://github.com/openai/symphony
-cd symphony/elixir
-mise trust
-mise install
-mise exec -- mix setup
-mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
-```
-
 ## Configuration
 
-Pass a custom workflow file path to `./bin/symphony` when starting the service:
-
-```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
-```
-
-If no path is passed, Symphony defaults to `./WORKFLOW.md`.
+The container entrypoint runs `./bin/symphony /run/symphony/WORKFLOW.md`. The mounted workflow file
+still uses YAML front matter plus a Markdown body used as the Codex session prompt.
 
 Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
-
-The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
 
 Minimal Linear example:
 
@@ -205,15 +178,12 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
-- Safer Codex defaults are used when policy fields are omitted:
-  - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
-  - `codex.thread_sandbox` defaults to `workspace-write`
-  - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
-- Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
-- Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
-  unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
-  Symphony validation.
+- Symphony always forces the Codex runtime to container-boundary defaults:
+  - `approval_policy: never`
+  - `thread_sandbox: danger-full-access`
+  - `turn_sandbox_policy.type: dangerFullAccess`
+- Workflow `codex.approval_policy`, `codex.thread_sandbox`, and `codex.turn_sandbox_policy` values
+  may still appear in parsed settings, but they are not used at runtime.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
@@ -225,9 +195,8 @@ Notes:
 - `tracker.api_key` reads from `LINEAR_API_KEY` when unset or when value is `$LINEAR_API_KEY`.
 - For Trello, `tracker.api_key` reads from `TRELLO_API_KEY`, `tracker.api_token` reads from
   `TRELLO_API_TOKEN`, and `tracker.board_id` reads from `TRELLO_BOARD_ID` when unset.
-- Guarded mode is configured under `guardrails.*`. Use `codex.approval_policy: on-request` together
-  with `guardrails.enabled: true` if you want pending operator approvals instead of
-  `approval_policy: never`.
+- Codex command/file approval prompts are not supported. Operator review happens through workflow
+  states such as `Human Review` and `Merging`, not via in-run approval/resume mechanics.
 - Symphony auto-loads `.env` from the same directory as the active `WORKFLOW.md` file without
   overriding already-exported process environment variables.
 - For path values, `~` is expanded to the home directory.
@@ -271,7 +240,7 @@ The observability UI now runs on a minimal Phoenix stack:
 
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
-- `WORKFLOW.md`: in-repo workflow contract used by local runs
+- `WORKFLOW.*.docker.md`: workflow contracts mounted into the container runtime
 - `../.codex/`: repository-local Codex skills and setup helpers
 
 ## Testing
@@ -330,8 +299,7 @@ Linear issue, then marks the project completed so the run remains visible in Lin
 
 For Trello setup guidance and a recommended board column layout, see [docs/trello.md](docs/trello.md).
 For GitHub Projects v2 setup guidance, see [docs/github.md](docs/github.md).
-For guarded operator mode, approval decisions, and full-access overrides, see
-[docs/guardrails.md](docs/guardrails.md).
+For current guardrail and review-state behavior, see [docs/guardrails.md](docs/guardrails.md).
 
 ## Docker
 
@@ -340,7 +308,7 @@ or `~/.codex/auth.json`. Instead:
 
 - Trello credentials are loaded from [`.env`](.env) via Compose `env_file`
 - repository access uses HTTPS and optional `GITHUB_TOKEN`
-- Codex auth is persisted inside the named Docker volume mounted at `/root/.codex`
+- Codex auth is persisted inside the named Docker volume mounted at `/home/symphony/.codex`
 
 First-time Codex login inside Docker:
 
@@ -380,11 +348,8 @@ Configuration:
 
 ## Support posture
 
-- Primary: Linux container runtime via Docker
-- Secondary: host-local Linux/macOS development runs
-- Best effort: host-local Windows runs
-
-When in doubt, prefer the Docker workflows and container paths in this directory.
+- Supported runtime: Linux container runtime via Docker
+- Local host execution: development and test tooling only, not a supported deployment mode
 
 ## FAQ
 
