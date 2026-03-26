@@ -74,6 +74,8 @@ defmodule SymphonyElixir.GitHubAccess do
 
     with {:ok, config_doc} <- config_document(),
          {:ok, token_entry} <- secret_entry() do
+      token_entry = display_token_entry(token_entry)
+
       {:ok,
        %{
          generated_at: now_iso8601(),
@@ -408,6 +410,38 @@ defmodule SymphonyElixir.GitHubAccess do
       cleared_at: token_entry.cleared_at,
       cleared_by: token_entry.cleared_by,
       clear_reason: token_entry.clear_reason
+    }
+  end
+
+  # The settings card should show the token source the runtime will actually use.
+  defp display_token_entry(token_entry) do
+    case effective_token_info() do
+      %{source: "env"} ->
+        effective_token_entry("env")
+
+      %{source: "ui_secret"} when token_entry.configured ->
+        token_entry
+
+      %{source: "ui_secret"} ->
+        effective_token_entry("ui_secret")
+
+      _ ->
+        token_entry
+    end
+  end
+
+  defp effective_token_entry(source) do
+    %{
+      key: @secret_key,
+      configured: true,
+      source: source,
+      updated_at: nil,
+      updated_by: nil,
+      reason: nil,
+      cleared_at: nil,
+      cleared_by: nil,
+      clear_reason: nil,
+      value: nil
     }
   end
 

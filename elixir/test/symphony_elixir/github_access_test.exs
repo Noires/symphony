@@ -76,6 +76,12 @@ defmodule SymphonyElixir.GitHubAccessTest do
     assert Enum.find(payload.settings, &(&1.path == "landing_mode")).effective_value ==
              "pull_request"
 
+    assert payload.token.configured == true
+    assert payload.token.source == "env"
+    assert payload.token.source_label == "Environment"
+    assert payload.token.updated_at == nil
+    assert payload.token.cleared_at == nil
+
     assert {:ok, payload} =
              GitHubAccess.set_token(
                "ui-github-token",
@@ -90,6 +96,19 @@ defmodule SymphonyElixir.GitHubAccessTest do
     assert File.read!(GitHubAccess.token_file_path()) == "ui-github-token"
 
     assert Config.settings!().tracker.api_token == "ui-github-token"
+
+    assert {:ok, payload} =
+             GitHubAccess.clear_token(
+               actor: "test",
+               reason: "remove dashboard token"
+             )
+
+    assert payload.token.configured == true
+    assert payload.token.source == "env"
+    assert payload.token.source_label == "Environment"
+    assert payload.token.updated_at == nil
+    assert payload.token.cleared_at == nil
+    assert Config.settings!().tracker.api_token == "env-github-token"
   end
 
   test "workspace hooks receive github access overrides and a local token file" do

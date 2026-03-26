@@ -1193,6 +1193,10 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   test "phoenix observability api exposes github access config and write-only token controls" do
+    previous_github_token = System.get_env("GITHUB_TOKEN")
+    System.put_env("GITHUB_TOKEN", "env-api-token")
+    on_exit(fn -> restore_env("GITHUB_TOKEN", previous_github_token) end)
+
     write_workflow_file!(Workflow.workflow_file_path(),
       guardrails_operator_token: "github-access-token"
     )
@@ -1218,6 +1222,11 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert Enum.any?(payload["settings"], fn setting ->
              setting["path"] == "source_repo_url" and setting["effective_value"] != nil
            end)
+
+    assert get_in(payload, ["token", "configured"]) == true
+    assert get_in(payload, ["token", "source"]) == "env"
+    assert get_in(payload, ["token", "source_label"]) == "Environment"
+    refute inspect(payload) =~ "env-api-token"
 
     updated_payload =
       json_response(
@@ -1258,7 +1267,9 @@ defmodule SymphonyElixir.ExtensionsTest do
         200
       )
 
-    assert get_in(cleared_payload, ["token", "configured"]) == false
+    assert get_in(cleared_payload, ["token", "configured"]) == true
+    assert get_in(cleared_payload, ["token", "source"]) == "env"
+    refute inspect(cleared_payload) =~ "env-api-token"
 
     assert json_response(
              post(build_conn(), "/api/v1/github/config", %{
