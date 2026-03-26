@@ -167,16 +167,16 @@ defmodule SymphonyElixirWeb.RunLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <section class="app-shell">
-      <DashboardComponents.app_header
-        page={%{title: "Run Detail"}}
-        operator_authenticated={@operator_authenticated}
-        operator_token_configured={operator_token_configured?()}
-        nav_items={run_navigation_items()}
-        utility_items={run_utility_items(@payload)}
-      />
+    <DashboardComponents.command_bar
+      page={%{title: "Run Detail"}}
+      operator_authenticated={@operator_authenticated}
+      operator_token_configured={operator_token_configured?()}
+      operator_token={@operator_token}
+      nav_items={run_navigation_items()}
+      utility_items={run_utility_items(@payload)}
+    />
 
-      <section class="dashboard-shell">
+    <section class="page-theater report-column">
       <%= if @payload[:error] do %>
           <DashboardComponents.page_header
             eyebrow="Persisted audit run"
@@ -234,31 +234,15 @@ defmodule SymphonyElixirWeb.RunLive do
         <DashboardComponents.section_frame
           kicker="Operator control"
           title="Guardrails"
-          copy="Approve blocked actions and control full access directly from this run view."
+          copy="Approve blocked actions and control full access directly from this run view. Enter operator token in the command bar above."
         >
-          <section class="split-grid-tight">
-            <form phx-change="update_operator_token" class="stack-sm">
-              <div class="field-group">
-                <label class="field-label" for="run-operator-token">Operator token</label>
-                <input
-                  id="run-operator-token"
-                  type="password"
-                  name="operator_token"
-                  value={@operator_token}
-                  autocomplete="current-password"
-                  class="field-input"
-                />
-              </div>
-            </form>
-
-            <DashboardComponents.key_value_list
-              items={[
-                %{label: "Status", value: if(@operator_authenticated, do: "authenticated", else: "token required")},
-                %{label: "Configured", value: if(operator_token_configured?(), do: "yes", else: "no")},
-                %{label: "Storage", value: "LiveView session state only"}
-              ]}
-            />
-          </section>
+          <DashboardComponents.key_value_list
+            items={[
+              %{label: "Status", value: if(@operator_authenticated, do: "authenticated", else: "token required")},
+              %{label: "Configured", value: if(operator_token_configured?(), do: "yes", else: "no")},
+              %{label: "Storage", value: "LiveView session state only"}
+            ]}
+          />
         </DashboardComponents.section_frame>
 
         <%= if @payload.active_overrides != [] do %>
@@ -275,17 +259,16 @@ defmodule SymphonyElixirWeb.RunLive do
         <% end %>
 
         <%= if @payload.live_issue do %>
-          <section class="section-card">
-            <div class="section-header">
-              <div>
-                <p class="section-kicker">Runtime</p>
-                <h2 class="section-title">Current issue state</h2>
-                <p class="section-copy">Live orchestration state for the same issue, if it is still active in the current runtime.</p>
-              </div>
-            </div>
-
+          <DashboardComponents.section_frame
+            kicker="Runtime"
+            title="Current issue state"
+            copy="Live orchestration state for the same issue, if it is still active in the current runtime."
+            collapsible={true}
+            open={true}
+          >
             <div class="table-wrap">
               <table class="data-table" style="min-width: 760px;">
+                <caption class="sr-only">Current live issue state for this ticket, including workspace, worker host, pending approval, and last error</caption>
                 <tbody>
                   <tr><th>Issue status</th><td><span class={state_badge_class(@payload.live_issue.status || "unknown")}><%= @payload.live_issue.status || "unknown" %></span></td></tr>
                   <tr><th>Workspace</th><td><span class="mono"><%= get_in(@payload.live_issue, [:workspace, :path]) || "n/a" %></span></td></tr>
@@ -295,36 +278,37 @@ defmodule SymphonyElixirWeb.RunLive do
                 </tbody>
               </table>
             </div>
-          </section>
+          </DashboardComponents.section_frame>
         <% end %>
 
         <%= if @payload.pending_approval do %>
-          <section class="section-card">
-            <div class="section-header">
-              <div>
-                <p class="section-kicker">Approval pending</p>
-                <h2 class="section-title">Operator decision required</h2>
-                <p class="section-copy">This run is paused until the pending approval is allowed or denied.</p>
-              </div>
-              <div class="section-meta">
-                <span class={state_badge_class(@payload.pending_approval.risk_level || "review")}>
-                  <%= @payload.pending_approval.risk_level || "review" %>
-                </span>
-              </div>
-            </div>
-
-            <div class="detail-stack" style="margin-bottom: 1rem;">
-              <span class="event-text"><%= @payload.pending_approval.summary || "approval pending" %></span>
-              <span class="muted event-meta"><%= @payload.pending_approval.reason || "operator review required" %></span>
-              <span :if={get_in(@payload.pending_approval, [:explanation, "evaluation", "reason"])} class="muted event-meta">
-                Why: <%= get_in(@payload.pending_approval, [:explanation, "evaluation", "reason"]) %>
+          <DashboardComponents.section_frame
+            kicker="Approval pending"
+            title="Operator decision required"
+            copy="This run is paused until the pending approval is allowed or denied."
+            collapsible={true}
+            open={true}
+          >
+            <:meta>
+              <span class={state_badge_class(@payload.pending_approval.risk_level || "review")}>
+                <%= @payload.pending_approval.risk_level || "review" %>
               </span>
-              <span class="muted event-meta mono"><%= @payload.pending_approval.fingerprint || "n/a" %></span>
-              <span :for={line <- approval_detail_preview(@payload.pending_approval)} class="muted event-meta"><%= line %></span>
+            </:meta>
+
+            <div class="stack-sm" style="margin-bottom: 1rem;">
+              <p class="event-text"><%= @payload.pending_approval.summary || "approval pending" %></p>
+              <ul class="detail-list">
+                <li><%= @payload.pending_approval.reason || "operator review required" %></li>
+                <li :if={get_in(@payload.pending_approval, [:explanation, "evaluation", "reason"])}>
+                  Why: <%= get_in(@payload.pending_approval, [:explanation, "evaluation", "reason"]) %>
+                </li>
+                <li class="mono-wrap"><%= @payload.pending_approval.fingerprint || "n/a" %></li>
+                <li :for={line <- approval_detail_preview(@payload.pending_approval)}><%= line %></li>
+              </ul>
             </div>
 
-            <div class="detail-stack">
-              <form phx-submit="guardrail_decide" class="detail-stack">
+            <div class="stack-sm">
+              <form phx-submit="guardrail_decide" class="button-row">
                 <input type="hidden" name="approval_id" value={@payload.pending_approval.id} />
                 <button type="submit" class="subtle-button" name="decision" value="allow_once" disabled={!@operator_authenticated} phx-disable-with="Allowing once...">
                   Allow once
@@ -335,7 +319,7 @@ defmodule SymphonyElixirWeb.RunLive do
                 <button type="submit" class="subtle-button" name="decision" value="allow_via_rule" disabled={!@operator_authenticated} phx-disable-with="Creating rule...">
                   Always allow
                 </button>
-                <button type="submit" class="subtle-button" name="decision" value="deny" disabled={!@operator_authenticated} phx-disable-with="Denying...">
+                <button type="submit" class="subtle-button subtle-button-danger" name="decision" value="deny" disabled={!@operator_authenticated} phx-disable-with="Denying...">
                   Deny
                 </button>
               </form>
@@ -352,21 +336,20 @@ defmodule SymphonyElixirWeb.RunLive do
                 Full access for run
               </button>
             </div>
-          </section>
+          </DashboardComponents.section_frame>
         <% end %>
 
         <%= if @payload.active_overrides != [] do %>
-          <section class="section-card">
-            <div class="section-header">
-              <div>
-                <p class="section-kicker">Safety posture</p>
-                <h2 class="section-title">Active overrides</h2>
-                <p class="section-copy">Run-scoped and workflow-wide overrides affecting this run context.</p>
-              </div>
-            </div>
-
+          <DashboardComponents.section_frame
+            kicker="Safety posture"
+            title="Active overrides"
+            copy="Run-scoped and workflow-wide overrides affecting this run context."
+            collapsible={true}
+            open={true}
+          >
             <div class="table-wrap">
               <table class="data-table" style="min-width: 760px;">
+                <caption class="sr-only">Active run and workflow overrides affecting this run context</caption>
                 <thead>
                   <tr>
                     <th>Scope</th>
@@ -415,21 +398,19 @@ defmodule SymphonyElixirWeb.RunLive do
                 </tbody>
               </table>
             </div>
-          </section>
+          </DashboardComponents.section_frame>
         <% end %>
 
         <%= if @payload.active_rules != [] do %>
-          <section class="section-card">
-            <div class="section-header">
-              <div>
-                <p class="section-kicker">Policy</p>
-                <h2 class="section-title">Relevant guardrail rules</h2>
-                <p class="section-copy">Persisted rules currently relevant to this run or workflow context.</p>
-              </div>
-            </div>
-
+          <DashboardComponents.section_frame
+            kicker="Policy"
+            title="Relevant guardrail rules"
+            copy="Persisted rules currently relevant to this run or workflow context."
+            collapsible={true}
+          >
             <div class="table-wrap">
               <table class="data-table" style="min-width: 820px;">
+                <caption class="sr-only">Relevant persisted guardrail rules for this run or workflow context</caption>
                 <thead>
                   <tr>
                     <th>Scope</th>
@@ -456,9 +437,9 @@ defmodule SymphonyElixirWeb.RunLive do
                     </td>
                     <td class="mono"><%= rule[:created_at] || rule["created_at"] || "n/a" %></td>
                     <td>
-                      <div class="detail-stack">
+                      <div class="stack-sm">
                         <span class="numeric"><%= remaining_uses_label(rule[:remaining_uses] || rule["remaining_uses"]) %></span>
-                        <div class="detail-stack">
+                        <div class="button-row">
                           <button
                             type="button"
                             class="subtle-button"
@@ -486,59 +467,58 @@ defmodule SymphonyElixirWeb.RunLive do
                 </tbody>
               </table>
             </div>
-          </section>
+          </DashboardComponents.section_frame>
         <% end %>
 
-        <section class="metric-grid">
-          <article class="metric-card">
-            <p class="metric-label">Runtime</p>
-            <p class="metric-value numeric"><%= format_duration_ms(run["duration_ms"]) %></p>
-            <p class="metric-detail">Codex execution time for this run.</p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Queue wait</p>
-            <p class="metric-value numeric"><%= format_duration_ms(get_in(run, ["timing", "queue_wait_ms"])) %></p>
-            <p class="metric-detail">Time from eligibility to dispatch.</p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Human wait</p>
-            <p class="metric-value numeric"><%= format_duration_ms(get_in(run, ["timing", "blocked_for_human_ms"])) %></p>
-            <p class="metric-detail">Time spent waiting for human follow-up before this run.</p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Turns</p>
-            <p class="metric-value numeric"><%= run["turn_count"] || 0 %></p>
-            <p class="metric-detail">Completed Codex turns for this run.</p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Tokens</p>
-            <p class="metric-value numeric"><%= format_int(get_in(run, ["tokens", "total_tokens"]) || 0) %></p>
-            <p class="metric-detail numeric">
-              In <%= format_int(get_in(run, ["tokens", "input_tokens"]) || 0) %> / Cached <%= format_int(get_in(run, ["tokens", "cached_input_tokens"]) || 0) %> / Uncached <%= format_int(get_in(run, ["tokens", "uncached_input_tokens"]) || 0) %> / Out <%= format_int(get_in(run, ["tokens", "output_tokens"]) || 0) %>
-            </p>
-          </article>
-
-          <article class="metric-card">
-            <p class="metric-label">Storage</p>
-            <p class="metric-value"><%= @payload.storage_backend || "n/a" %></p>
-            <p class="metric-detail">Audit backend used for this persisted run.</p>
-          </article>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Run summary</h2>
-              <p class="section-copy">Outcome, state transitions, git metadata, and hook results from the persisted run summary.</p>
-            </div>
+        <dl class="metric-grid" aria-label="Run metrics">
+          <div class="metric-card">
+            <dt class="metric-label">Runtime</dt>
+            <dd class="metric-value numeric"><%= format_duration_ms(run["duration_ms"]) %></dd>
+            <dd class="metric-detail">Codex execution time for this run.</dd>
           </div>
 
+          <div class="metric-card">
+            <dt class="metric-label">Queue wait</dt>
+            <dd class="metric-value numeric"><%= format_duration_ms(get_in(run, ["timing", "queue_wait_ms"])) %></dd>
+            <dd class="metric-detail">Time from eligibility to dispatch.</dd>
+          </div>
+
+          <div class="metric-card">
+            <dt class="metric-label">Human wait</dt>
+            <dd class="metric-value numeric"><%= format_duration_ms(get_in(run, ["timing", "blocked_for_human_ms"])) %></dd>
+            <dd class="metric-detail">Time spent waiting for human follow-up before this run.</dd>
+          </div>
+
+          <div class="metric-card">
+            <dt class="metric-label">Turns</dt>
+            <dd class="metric-value numeric"><%= run["turn_count"] || 0 %></dd>
+            <dd class="metric-detail">Completed Codex turns for this run.</dd>
+          </div>
+
+          <div class="metric-card">
+            <dt class="metric-label">Tokens</dt>
+            <dd class="metric-value numeric"><%= format_int(get_in(run, ["tokens", "total_tokens"]) || 0) %></dd>
+            <dd class="metric-detail numeric">
+              In <%= format_int(get_in(run, ["tokens", "input_tokens"]) || 0) %> / Cached <%= format_int(get_in(run, ["tokens", "cached_input_tokens"]) || 0) %> / Uncached <%= format_int(get_in(run, ["tokens", "uncached_input_tokens"]) || 0) %> / Out <%= format_int(get_in(run, ["tokens", "output_tokens"]) || 0) %>
+            </dd>
+          </div>
+
+          <div class="metric-card">
+            <dt class="metric-label">Storage</dt>
+            <dd class="metric-value"><%= @payload.storage_backend || "n/a" %></dd>
+            <dd class="metric-detail">Audit backend used for this persisted run.</dd>
+          </div>
+        </dl>
+
+        <DashboardComponents.section_frame
+          title="Run summary"
+          copy="Outcome, state transitions, git metadata, and hook results from the persisted run summary."
+          collapsible={true}
+          open={true}
+        >
           <div class="table-wrap">
             <table class="data-table" style="min-width: 760px;">
+              <caption class="sr-only">Run summary with tracker state, next action, git metadata, hook results, workspace, session, and efficiency posture</caption>
               <tbody>
                 <tr><th>Tracker state</th><td><%= tracker_state_label(run) %></td></tr>
                 <tr><th>Next action</th><td><%= run["next_action"] || "n/a" %></td></tr>
@@ -558,19 +538,17 @@ defmodule SymphonyElixirWeb.RunLive do
               </tbody>
             </table>
           </div>
-        </section>
+        </DashboardComponents.section_frame>
 
         <%= if run["prompt_shape"] do %>
-          <section class="section-card">
-            <div class="section-header">
-              <div>
-                <h2 class="section-title">Prompt cost</h2>
-                <p class="section-copy">Base prompt shape and continuity metadata captured for this run.</p>
-              </div>
-            </div>
-
+          <DashboardComponents.section_frame
+            title="Prompt cost"
+            copy="Base prompt shape and continuity metadata captured for this run."
+            collapsible={true}
+          >
             <div class="table-wrap">
               <table class="data-table" style="min-width: 760px;">
+                <caption class="sr-only">Prompt cost metrics captured for this run</caption>
                 <tbody>
                   <tr><th>Tracker payload chars</th><td><%= format_int(get_in(run, ["prompt_shape", "tracker_payload_chars"]) || 0) %></td></tr>
                   <tr><th>Workflow prompt chars</th><td><%= format_int(get_in(run, ["prompt_shape", "workflow_prompt_chars"]) || 0) %></td></tr>
@@ -585,19 +563,17 @@ defmodule SymphonyElixirWeb.RunLive do
                 </tbody>
               </table>
             </div>
-          </section>
+          </DashboardComponents.section_frame>
         <% end %>
 
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Run efficiency</h2>
-              <p class="section-copy">Advisory classification for this run, separating cached-heavy context from true uncached spend.</p>
-            </div>
-          </div>
-
+        <DashboardComponents.section_frame
+          title="Run efficiency"
+          copy="Advisory classification for this run, separating cached-heavy context from true uncached spend."
+          collapsible={true}
+        >
           <div class="table-wrap">
             <table class="data-table" style="min-width: 760px;">
+              <caption class="sr-only">Run efficiency classification and derived advisory ratios</caption>
               <tbody>
                 <tr><th>Classification</th><td><span class={efficiency_badge_class(get_in(run, ["efficiency", "classification"]))}><%= efficiency_label(run) %></span></td></tr>
                 <tr><th>Flags</th><td><%= efficiency_flags_label(run) %></td></tr>
@@ -606,22 +582,20 @@ defmodule SymphonyElixirWeb.RunLive do
                 <tr><th>Uncached / changed file</th><td><%= format_ratio(get_in(run, ["efficiency", "uncached_input_tokens_per_changed_file"])) %></td></tr>
                 <tr><th>Tokens / minute</th><td><%= format_ratio(get_in(run, ["efficiency", "tokens_per_minute"])) %></td></tr>
                 <tr><th>Cached input share</th><td><%= format_pct(get_in(run, ["efficiency", "cached_input_share_pct"])) %></td></tr>
-              </tbody>
-            </table>
-          </div>
-        </section>
+                </tbody>
+              </table>
+            </div>
+        </DashboardComponents.section_frame>
 
         <%= if @payload.issue_rollup do %>
-          <section class="section-card">
-            <div class="section-header">
-              <div>
-                <h2 class="section-title">Issue efficiency</h2>
-                <p class="section-copy">Aggregate metrics across persisted runs for this ticket.</p>
-              </div>
-            </div>
-
+          <DashboardComponents.section_frame
+            title="Issue efficiency"
+            copy="Aggregate metrics across persisted runs for this ticket."
+            collapsible={true}
+          >
             <div class="table-wrap">
               <table class="data-table" style="min-width: 760px;">
+                <caption class="sr-only">Issue efficiency rollup across persisted runs for this ticket</caption>
                 <tbody>
                   <tr><th>Run count</th><td><%= @payload.issue_rollup["run_count"] || 0 %></td></tr>
                   <tr><th>Latest status</th><td><%= @payload.issue_rollup["latest_status"] || "n/a" %></td></tr>
@@ -642,22 +616,20 @@ defmodule SymphonyElixirWeb.RunLive do
                 </tbody>
               </table>
             </div>
-          </section>
+          </DashboardComponents.section_frame>
         <% end %>
 
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Diff preview</h2>
-              <p class="section-copy">File-level change preview from git metadata, without storing the full patch.</p>
-            </div>
-          </div>
-
+        <DashboardComponents.section_frame
+          title="Diff preview"
+          copy="File-level change preview from git metadata, without storing the full patch."
+          collapsible={true}
+        >
           <%= if diff_preview_files(run) == [] do %>
             <p class="empty-state">No diff preview was captured for this run.</p>
           <% else %>
             <div class="table-wrap">
               <table class="data-table" style="min-width: 900px;">
+                <caption class="sr-only">Diff preview files with path, status, stats, and captured hunks</caption>
                 <thead>
                   <tr>
                     <th>Path</th>
@@ -677,48 +649,48 @@ defmodule SymphonyElixirWeb.RunLive do
               </table>
             </div>
           <% end %>
-        </section>
+        </DashboardComponents.section_frame>
 
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Run navigation</h2>
-              <p class="section-copy">Jump to adjacent persisted runs for the same issue.</p>
-            </div>
-          </div>
+        <DashboardComponents.section_frame
+          title="Run navigation"
+          copy="Jump to adjacent persisted runs for the same issue."
+          collapsible={true}
+        >
+          <nav aria-label="Adjacent runs">
+            <ul class="stack-sm detail-nav-list">
+              <li>
+                <%= if @payload.previous_run do %>
+                  <a class="issue-link" href={run_path(@payload.issue_identifier, @payload.previous_run["run_id"])}>
+                    Older run: <%= @payload.previous_run["run_id"] %>
+                  </a>
+                <% else %>
+                  <span class="muted">No older run.</span>
+                <% end %>
+              </li>
+              <li>
+                <%= if @payload.next_run do %>
+                  <a class="issue-link" href={run_path(@payload.issue_identifier, @payload.next_run["run_id"])}>
+                    Newer run: <%= @payload.next_run["run_id"] %>
+                  </a>
+                <% else %>
+                  <span class="muted">No newer run.</span>
+                <% end %>
+              </li>
+            </ul>
+          </nav>
+        </DashboardComponents.section_frame>
 
-          <div class="detail-stack">
-            <%= if @payload.previous_run do %>
-              <a class="issue-link" href={run_path(@payload.issue_identifier, @payload.previous_run["run_id"])}>
-                Older run: <%= @payload.previous_run["run_id"] %>
-              </a>
-            <% else %>
-              <span class="muted">No older run.</span>
-            <% end %>
-
-            <%= if @payload.next_run do %>
-              <a class="issue-link" href={run_path(@payload.issue_identifier, @payload.next_run["run_id"])}>
-                Newer run: <%= @payload.next_run["run_id"] %>
-              </a>
-            <% else %>
-              <span class="muted">No newer run.</span>
-            <% end %>
-          </div>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Event timeline</h2>
-              <p class="section-copy">Persisted event stream for this run, including hooks, Codex updates, and lifecycle events.</p>
-            </div>
-          </div>
-
+        <DashboardComponents.section_frame
+          title="Event timeline"
+          copy="Persisted event stream for this run, including hooks, Codex updates, and lifecycle events."
+          collapsible={true}
+        >
           <%= if @payload.events == [] do %>
             <p class="empty-state">No events were persisted for this run.</p>
           <% else %>
             <div class="table-wrap">
               <table class="data-table" style="min-width: 940px;">
+                <caption class="sr-only">Persisted event timeline for this run</caption>
                 <thead>
                   <tr>
                     <th>At</th>
@@ -740,9 +712,8 @@ defmodule SymphonyElixirWeb.RunLive do
               </table>
             </div>
           <% end %>
-        </section>
+        </DashboardComponents.section_frame>
       <% end %>
-      </section>
     </section>
     """
   end
@@ -837,7 +808,7 @@ defmodule SymphonyElixirWeb.RunLive do
   defp format_pct(_value), do: "n/a"
 
   defp state_badge_class(state) do
-    base = "state-badge"
+    base = "state-badge state-badge-neutral"
     normalized = state |> to_string() |> String.downcase()
 
     cond do
@@ -1005,7 +976,7 @@ defmodule SymphonyElixirWeb.RunLive do
   defp efficiency_badge_class("context_window_heavy"), do: "state-badge state-badge-warning"
   defp efficiency_badge_class("cheap_win"), do: "state-badge state-badge-active"
   defp efficiency_badge_class("cheap_wins"), do: "state-badge state-badge-active"
-  defp efficiency_badge_class(_classification), do: "state-badge"
+  defp efficiency_badge_class(_classification), do: "state-badge state-badge-neutral"
 
   defp run_diff_summary(run) when is_map(run) do
     get_in(run, ["workspace_metadata", "git", "diff_summary"]) || "n/a"

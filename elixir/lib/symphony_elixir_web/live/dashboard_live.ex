@@ -344,36 +344,23 @@ defmodule SymphonyElixirWeb.DashboardLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <section class="dashboard-root">
-      <DashboardComponents.app_header
-        page={@page}
-        operator_authenticated={@operator_authenticated}
-        operator_token_configured={operator_token_configured?()}
-        nav_items={navigation_items(@page, @payload)}
-        utility_items={utility_items(@page)}
-      />
+    <DashboardComponents.command_bar
+      page={@page}
+      operator_authenticated={@operator_authenticated}
+      operator_token_configured={operator_token_configured?()}
+      operator_token={@operator_token}
+      nav_items={navigation_items(@page, @payload)}
+      utility_items={utility_items(@page)}
+    />
 
+    <section class="page-theater">
       <DashboardComponents.page_header
         eyebrow={@page.nav_label}
         title={@page.title}
         copy={@page.copy}
         status_label={system_health_label(@payload)}
         status_class={system_health_class(@payload)}
-      >
-        <:meta>
-          <DashboardComponents.key_value_list items={page_header_meta(@page, @payload, @now)} />
-        </:meta>
-        <:actions>
-          <.link
-            :for={action <- page_header_actions(@page, @payload)}
-            patch={action[:patch]}
-            href={action[:href]}
-            class={if action[:primary], do: "primary-button", else: "utility-link"}
-          >
-            <%= action.label %>
-          </.link>
-        </:actions>
-      </DashboardComponents.page_header>
+      />
 
       <%= if @payload[:error] do %>
         <DashboardComponents.section_frame
@@ -412,505 +399,478 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp overview_page(assigns) do
     ~H"""
-    <section class="dashboard-grid dashboard-grid-main">
-      <div class="stack-lg">
-        <section class="attention-grid" aria-label="Attention now">
-          <article class={attention_card_class(@payload.counts.pending_approvals > 0)}>
-            <p class="attention-kicker">Urgent approvals</p>
-            <h2 class="attention-title"><%= @payload.counts.pending_approvals %> waiting</h2>
-            <p class="attention-copy">
-              <%= first_pending_summary(@filtered_approvals || @payload.pending_approvals) %>
-            </p>
-            <.link patch={page_path(:approvals)} class="inline-link">Open approvals queue</.link>
-          </article>
+    <section class="stack-lg">
+      <%!-- Full width: Attention cards --%>
+      <section class="attention-grid" aria-label="Attention now">
+        <article class={attention_card_class(@payload.counts.pending_approvals > 0)}>
+          <p class="attention-kicker">Urgent approvals</p>
+          <h2 class="attention-title"><%= @payload.counts.pending_approvals %> waiting</h2>
+          <p class="attention-copy">
+            <%= first_pending_summary(@filtered_approvals || @payload.pending_approvals) %>
+          </p>
+          <.link patch={page_path(:approvals)} class="inline-link">Open approvals queue</.link>
+        </article>
 
-          <article class={attention_card_class(@payload.counts.retrying > 0)}>
-            <p class="attention-kicker">Retry pressure</p>
-            <h2 class="attention-title"><%= @payload.counts.retrying %> queued</h2>
-            <p class="attention-copy"><%= retry_focus_label(@payload.retrying) %></p>
-            <a href="#retry-queue" class="inline-link">Inspect retry queue</a>
-          </article>
+        <article class={attention_card_class(@payload.counts.retrying > 0)}>
+          <p class="attention-kicker">Retry pressure</p>
+          <h2 class="attention-title"><%= @payload.counts.retrying %> queued</h2>
+          <p class="attention-copy"><%= retry_focus_label(@payload.retrying) %></p>
+          <a href="#retry-queue" class="inline-link">Inspect retry queue</a>
+        </article>
 
-          <article class={attention_card_class(@payload.counts.active_overrides > 0)}>
-            <p class="attention-kicker">Safety posture</p>
-            <h2 class="attention-title"><%= @payload.counts.active_overrides %> active overrides</h2>
-            <p class="attention-copy"><%= override_summary(@payload.guardrail_overrides) %></p>
-            <.link patch={page_path(:approvals)} class="inline-link">Review full access posture</.link>
-          </article>
-        </section>
+        <article class={attention_card_class(@payload.counts.active_overrides > 0)}>
+          <p class="attention-kicker">Safety posture</p>
+          <h2 class="attention-title"><%= @payload.counts.active_overrides %> active overrides</h2>
+          <p class="attention-copy"><%= override_summary(@payload.guardrail_overrides) %></p>
+          <.link patch={page_path(:approvals)} class="inline-link">Review full access posture</.link>
+        </article>
+      </section>
 
-        <DashboardComponents.section_frame
-          id="running-sessions"
-          kicker="Live execution"
-          title="Running sessions"
-          copy="Active issues, last known agent activity, and token usage."
-        >
-          <%= if @payload.running == [] do %>
-            <DashboardComponents.empty_state
-              title="No active sessions"
-              copy="When Symphony claims work, the live session table appears here with session state, runtime, and Codex output."
-            />
-          <% else %>
-            <div class="table-scroll">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Issue</th>
-                    <th>State</th>
-                    <th>Worker</th>
-                    <th>Runtime</th>
-                    <th>Codex update</th>
-                    <th>Tokens</th>
-                    <th>Session</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr :for={entry <- overview_running_entries(@payload.running)}>
-                    <td>
-                      <div class="cell-stack">
-                        <strong class="cell-primary"><%= entry.issue_identifier %></strong>
-                        <span class="cell-secondary"><%= entry.workspace_path || "workspace pending" %></span>
-                      </div>
-                    </td>
-                    <td><span class={state_badge_class(entry.state)}><%= entry.state %></span></td>
-                    <td class="mono"><%= entry.worker_host || "local" %></td>
-                    <td class="numeric"><%= format_runtime_and_turns(entry.started_at, entry.turn_count, @now) %></td>
-                    <td>
-                      <div class="cell-stack">
-                        <span class="cell-primary"><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
-                        <span class="cell-secondary mono"><%= entry.last_event_at || "n/a" %></span>
-                      </div>
-                    </td>
-                    <td class="numeric">
-                      <div class="cell-stack">
-                        <span class="cell-primary"><%= format_int(entry.tokens.total_tokens || 0) %></span>
-                        <span class="cell-secondary">uncached <%= format_int(entry.tokens.uncached_input_tokens || 0) %></span>
-                      </div>
-                    </td>
-                    <td>
-                      <%= if entry.session_id do %>
-                        <DashboardComponents.copy_button label="Copy ID" value={entry.session_id} />
-                      <% else %>
-                        <span class="muted-copy">n/a</span>
-                      <% end %>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          <% end %>
-        </DashboardComponents.section_frame>
-      </div>
-
-      <aside class="stack-lg">
-        <DashboardComponents.section_frame
-          kicker="System readout"
-          title="Operational pulse"
-          copy="Short-form context for triage before you drill into approvals, retries, or audit history."
-        >
-          <DashboardComponents.key_value_list
-            items={[
-              %{label: "System health", value: system_health_copy(@payload)},
-              %{label: "Priority session", value: primary_running_label(@payload.running)},
-              %{label: "Rate limits", value: rate_limit_focus(@payload.rate_limits)},
-              %{label: "Efficiency watch", value: efficiency_watch_label(@payload.expensive_runs, @payload.cheap_wins)},
-              %{label: "Recent landing", value: latest_completed_label(@payload.completed_runs)}
-            ]}
+      <%!-- Full width: Running sessions --%>
+      <DashboardComponents.section_frame
+        id="running-sessions"
+        kicker="Live execution"
+        title="Running sessions"
+        copy="Active issues, last known agent activity, and token usage."
+        collapsible={true}
+        open={@payload.running != []}
+      >
+        <%= if @payload.running == [] do %>
+          <DashboardComponents.empty_state
+            title="No active sessions"
+            copy="When Symphony claims work, the live session table appears here with session state, runtime, and Codex output."
           />
-        </DashboardComponents.section_frame>
+        <% else %>
+          <div class="table-scroll">
+            <table class="data-table">
+              <caption class="sr-only">Running sessions with issue, state, worker, runtime, Codex update, tokens, and session copy action</caption>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>State</th>
+                  <th>Worker</th>
+                  <th>Runtime</th>
+                  <th>Codex update</th>
+                  <th>Tokens</th>
+                  <th>Session</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={entry <- overview_running_entries(@payload.running)}>
+                  <td>
+                    <div class="cell-stack">
+                      <strong class="cell-primary"><%= entry.issue_identifier %></strong>
+                      <span class="cell-secondary"><%= entry.workspace_path || "workspace pending" %></span>
+                    </div>
+                  </td>
+                  <td><span class={state_badge_class(entry.state)}><%= entry.state %></span></td>
+                  <td class="mono"><%= entry.worker_host || "local" %></td>
+                  <td class="numeric"><%= format_runtime_and_turns(entry.started_at, entry.turn_count, @now) %></td>
+                  <td>
+                    <div class="cell-stack">
+                      <span class="cell-primary"><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
+                      <span class="cell-secondary mono"><%= entry.last_event_at || "n/a" %></span>
+                    </div>
+                  </td>
+                  <td class="numeric">
+                    <div class="cell-stack">
+                      <span class="cell-primary"><%= format_int(entry.tokens.total_tokens || 0) %></span>
+                      <span class="cell-secondary">uncached <%= format_int(entry.tokens.uncached_input_tokens || 0) %></span>
+                    </div>
+                  </td>
+                  <td>
+                    <%= if entry.session_id do %>
+                      <DashboardComponents.copy_button label="Copy ID" value={entry.session_id} />
+                    <% else %>
+                      <span class="muted-copy">n/a</span>
+                    <% end %>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </DashboardComponents.section_frame>
 
-        <DashboardComponents.section_frame
-          id="retry-queue"
-          kicker="Backoff queue"
-          title="Next retries"
-          copy="The next issues scheduled to re-enter dispatch."
-        >
-          <%= if @payload.retrying == [] do %>
-            <DashboardComponents.empty_state title="No retry queue" copy="Nothing is backing off right now." />
-          <% else %>
-            <div class="table-scroll">
-              <table class="data-table data-table-compact">
-                <thead>
-                  <tr>
-                    <th>Issue</th>
-                    <th>Attempt</th>
-                    <th>Due</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr :for={entry <- Enum.take(sorted_retrying(@payload.retrying), 6)}>
-                    <td>
-                      <div class="cell-stack">
-                        <strong class="cell-primary"><%= entry.issue_identifier %></strong>
-                        <span class="cell-secondary"><%= entry.error || "retry scheduled" %></span>
-                      </div>
-                    </td>
-                    <td class="numeric"><%= entry.attempt %></td>
-                    <td class="mono"><%= entry.due_at || "n/a" %></td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          <% end %>
-        </DashboardComponents.section_frame>
+      <%!-- Operational pulse (non-collapsible, standalone) --%>
+      <DashboardComponents.section_frame
+        kicker="System readout"
+        title="Operational pulse"
+        copy="Short-form context for triage before you drill into approvals, retries, or audit history."
+      >
+        <DashboardComponents.key_value_list
+          items={[
+            %{label: "System health", value: system_health_copy(@payload)},
+            %{label: "Priority session", value: primary_running_label(@payload.running)},
+            %{label: "Rate limits", value: rate_limit_focus(@payload.rate_limits)},
+            %{label: "Efficiency watch", value: efficiency_watch_label(@payload.expensive_runs, @payload.cheap_wins)},
+            %{label: "Recent landing", value: latest_completed_label(@payload.completed_runs)}
+          ]}
+        />
+      </DashboardComponents.section_frame>
 
-        <DashboardComponents.section_frame
-          kicker="Pending approvals"
-          title="Queue preview"
-          copy="Highest-risk approvals waiting for operator review."
-        >
-          <%= if @payload.pending_approvals == [] do %>
-            <DashboardComponents.empty_state title="Approval queue clear" copy="No guardrail actions are blocked right now." />
-          <% else %>
-            <div class="stack-sm">
-              <div :for={approval <- Enum.take(sort_approvals(@payload.pending_approvals), 4)} class="list-card">
-                <div class="list-card-head">
-                  <strong><%= approval.issue_identifier %></strong>
-                  <span class={state_badge_class(approval.risk_level || "review")}><%= approval.risk_level || "review" %></span>
-                </div>
-                <p class="list-card-copy"><%= approval.summary || "approval pending operator review" %></p>
-                <.link patch={page_path(:approvals, %{"selected" => approval.id})} class="inline-link">Inspect approval</.link>
+      <%!-- Collapsible sections — each gets its own full-width row --%>
+      <DashboardComponents.section_frame
+        id="retry-queue"
+        kicker="Backoff queue"
+        title="Next retries"
+        copy="The next issues scheduled to re-enter dispatch."
+        collapsible={true}
+        open={@payload.retrying != []}
+      >
+        <%= if @payload.retrying == [] do %>
+          <DashboardComponents.empty_state title="No retry queue" copy="Nothing is backing off right now." />
+        <% else %>
+          <div class="table-scroll">
+            <table class="data-table data-table-compact">
+              <caption class="sr-only">Upcoming retry queue entries with issue identifier, retry attempt, and next due time</caption>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Attempt</th>
+                  <th>Due</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={entry <- Enum.take(sorted_retrying(@payload.retrying), 6)}>
+                  <td>
+                    <div class="cell-stack">
+                      <strong class="cell-primary"><%= entry.issue_identifier %></strong>
+                      <span class="cell-secondary"><%= entry.error || "retry scheduled" %></span>
+                    </div>
+                  </td>
+                  <td class="numeric"><%= entry.attempt %></td>
+                  <td class="mono"><%= entry.due_at || "n/a" %></td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </DashboardComponents.section_frame>
+
+      <DashboardComponents.section_frame
+        kicker="Pending approvals"
+        title="Queue preview"
+        copy="Highest-risk approvals waiting for operator review."
+        collapsible={true}
+        open={@payload.pending_approvals != []}
+      >
+        <%= if @payload.pending_approvals == [] do %>
+          <DashboardComponents.empty_state title="Approval queue clear" copy="No guardrail actions are blocked right now." />
+        <% else %>
+          <ul class="stack-sm card-list">
+            <li :for={approval <- Enum.take(sort_approvals(@payload.pending_approvals), 4)} class="list-card">
+              <div class="list-card-head">
+                <strong><%= approval.issue_identifier %></strong>
+                <span class={state_badge_class(approval.risk_level || "review")}><%= approval.risk_level || "review" %></span>
               </div>
-            </div>
-          <% end %>
-        </DashboardComponents.section_frame>
-      </aside>
+              <p class="list-card-copy"><%= approval.summary || "approval pending operator review" %></p>
+              <.link patch={page_path(:approvals, %{"selected" => approval.id})} class="inline-link">Inspect approval</.link>
+            </li>
+          </ul>
+        <% end %>
+      </DashboardComponents.section_frame>
     </section>
     """
   end
 
   defp approvals_page(assigns) do
     ~H"""
-    <section class="dashboard-grid dashboard-grid-main">
-      <div class="stack-lg">
-        <%= operator_access_panel(assigns) %>
-
-        <DashboardComponents.section_frame
-          kicker="Queue triage"
-          title="Pending approvals"
-          copy="URL-backed filters let you share exactly what needs review without losing operator state."
-        >
-          <form phx-change="update_guardrail_filters" class="stack-md">
-            <DashboardComponents.filter_toolbar
-              label="Filter queue"
-              copy="Search by issue, summary, command, fingerprint, path, or worker host."
-            >
-              <div class="field-group">
-                <label for="approval-filter-query" class="field-label">Search</label>
-                <input
-                  id="approval-filter-query"
-                  type="search"
-                  name="q"
-                  value={@guardrail_filters["q"]}
-                  class="field-input"
-                  placeholder="Search approvals"
-                />
-              </div>
-
-              <div class="field-group">
-                <label for="approval-filter-issue" class="field-label">Issue</label>
-                <select id="approval-filter-issue" name="issue_identifier" class="field-select">
-                  <option value="">All issues</option>
-                  <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :issue_identifier), @guardrail_filters["issue_identifier"])} value={value} selected={@guardrail_filters["issue_identifier"] == value}>
-                    <%= value %>
-                  </option>
-                </select>
-              </div>
-
-              <div class="field-group">
-                <label for="approval-filter-action" class="field-label">Action</label>
-                <select id="approval-filter-action" name="action_type" class="field-select">
-                  <option value="">All actions</option>
-                  <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :action_type), @guardrail_filters["action_type"])} value={value} selected={@guardrail_filters["action_type"] == value}>
-                    <%= value %>
-                  </option>
-                </select>
-              </div>
-
-              <div class="field-group">
-                <label for="approval-filter-risk" class="field-label">Risk</label>
-                <select id="approval-filter-risk" name="risk_level" class="field-select">
-                  <option value="">All risks</option>
-                  <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :risk_level), @guardrail_filters["risk_level"])} value={value} selected={@guardrail_filters["risk_level"] == value}>
-                    <%= value %>
-                  </option>
-                </select>
-              </div>
-
-              <div class="field-group">
-                <label for="approval-filter-host" class="field-label">Worker host</label>
-                <select id="approval-filter-host" name="worker_host" class="field-select">
-                  <option value="">All hosts</option>
-                  <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :worker_host), @guardrail_filters["worker_host"])} value={value} selected={@guardrail_filters["worker_host"] == value}>
-                    <%= value %>
-                  </option>
-                </select>
-              </div>
-
-              <:actions>
-                <button type="button" class="secondary-button" phx-click="clear_guardrail_filters">
-                  Reset filters
-                </button>
-              </:actions>
-            </DashboardComponents.filter_toolbar>
-          </form>
-
-          <%= if @filtered_approvals == [] do %>
-            <DashboardComponents.empty_state
-              title="No approvals match these filters"
-              copy="Broaden the filter set or wait for a new guardrail decision to enter the queue."
-            />
-          <% else %>
-            <div class="table-scroll">
-              <table class="data-table">
-                <thead>
-                  <tr>
-                    <th>Issue</th>
-                    <th>Risk</th>
-                    <th>Action</th>
-                    <th>Requested</th>
-                    <th>Host</th>
-                    <th></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr :for={approval <- sort_approvals(@filtered_approvals)} class={if selected_approval?(@selected_approval, approval), do: "table-row-selected", else: nil}>
-                    <td>
-                      <div class="cell-stack">
-                        <strong class="cell-primary"><%= approval.issue_identifier %></strong>
-                        <span class="cell-secondary"><%= approval.summary || "approval pending operator review" %></span>
-                      </div>
-                    </td>
-                    <td><span class={state_badge_class(approval.risk_level || "review")}><%= approval.risk_level || "review" %></span></td>
-                    <td><span class="mono"><%= approval.action_type || approval.method || "n/a" %></span></td>
-                    <td class="mono"><%= approval.requested_at || "n/a" %></td>
-                    <td class="mono"><%= approval.worker_host || "local" %></td>
-                    <td class="table-actions">
-                      <.link patch={page_path(:approvals, Map.put(@guardrail_filters, "selected", approval.id))} class="inline-link">
-                        Inspect
-                      </.link>
-                    </td>
-                  </tr>
-                </tbody>
-              </table>
+    <section class="stack-lg">
+      <%!-- Full width: Pending approvals queue --%>
+      <DashboardComponents.section_frame
+        kicker="Queue triage"
+        title="Pending approvals"
+        copy="URL-backed filters let you share exactly what needs review without losing operator state."
+      >
+        <form phx-change="update_guardrail_filters" class="stack-md">
+          <DashboardComponents.filter_toolbar
+            label="Filter queue"
+            copy="Search by issue, summary, command, fingerprint, path, or worker host."
+          >
+            <div class="field-group field-group-search">
+              <label for="approval-filter-query" class="field-label">Search</label>
+              <input
+                id="approval-filter-query"
+                type="search"
+                name="q"
+                value={@guardrail_filters["q"]}
+                class="field-input"
+                placeholder="Search approvals"
+              />
             </div>
-          <% end %>
-        </DashboardComponents.section_frame>
-      </div>
 
-      <aside class="stack-lg">
-        <%= approval_detail(assigns) %>
-        <%= active_overrides_panel(assigns) %>
-        <%= guardrail_rules_panel(assigns) %>
-      </aside>
+            <div class="field-group">
+              <label for="approval-filter-issue" class="field-label">Issue</label>
+              <select id="approval-filter-issue" name="issue_identifier" class="field-select">
+                <option value="">All issues</option>
+                <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :issue_identifier), @guardrail_filters["issue_identifier"])} value={value} selected={@guardrail_filters["issue_identifier"] == value}>
+                  <%= value %>
+                </option>
+              </select>
+            </div>
+
+            <div class="field-group">
+              <label for="approval-filter-action" class="field-label">Action</label>
+              <select id="approval-filter-action" name="action_type" class="field-select">
+                <option value="">All actions</option>
+                <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :action_type), @guardrail_filters["action_type"])} value={value} selected={@guardrail_filters["action_type"] == value}>
+                  <%= value %>
+                </option>
+              </select>
+            </div>
+
+            <div class="field-group">
+              <label for="approval-filter-risk" class="field-label">Risk</label>
+              <select id="approval-filter-risk" name="risk_level" class="field-select">
+                <option value="">All risks</option>
+                <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :risk_level), @guardrail_filters["risk_level"])} value={value} selected={@guardrail_filters["risk_level"] == value}>
+                  <%= value %>
+                </option>
+              </select>
+            </div>
+
+            <div class="field-group">
+              <label for="approval-filter-host" class="field-label">Worker host</label>
+              <select id="approval-filter-host" name="worker_host" class="field-select">
+                <option value="">All hosts</option>
+                <option :for={value <- filter_values_with_selected(unique_filter_values(@payload.pending_approvals, :worker_host), @guardrail_filters["worker_host"])} value={value} selected={@guardrail_filters["worker_host"] == value}>
+                  <%= value %>
+                </option>
+              </select>
+            </div>
+
+            <:actions>
+              <button type="button" class="secondary-button" phx-click="clear_guardrail_filters">
+                Reset filters
+              </button>
+            </:actions>
+          </DashboardComponents.filter_toolbar>
+        </form>
+
+        <%= if @filtered_approvals == [] do %>
+          <DashboardComponents.empty_state
+            title="No approvals match these filters"
+            copy="Broaden the filter set or wait for a new guardrail decision to enter the queue."
+          />
+        <% else %>
+          <div class="table-scroll">
+            <table class="data-table">
+              <caption class="sr-only">Pending approvals with issue, risk, action, request time, worker host, and inspect action</caption>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>Risk</th>
+                  <th>Action</th>
+                  <th>Requested</th>
+                  <th>Host</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr :for={approval <- sort_approvals(@filtered_approvals)} class={if selected_approval?(@selected_approval, approval), do: "table-row-selected", else: nil}>
+                  <td>
+                    <div class="cell-stack">
+                      <strong class="cell-primary"><%= approval.issue_identifier %></strong>
+                      <span class="cell-secondary"><%= approval.summary || "approval pending operator review" %></span>
+                    </div>
+                  </td>
+                  <td><span class={state_badge_class(approval.risk_level || "review")}><%= approval.risk_level || "review" %></span></td>
+                  <td><span class="mono"><%= approval.action_type || approval.method || "n/a" %></span></td>
+                  <td class="mono"><%= approval.requested_at || "n/a" %></td>
+                  <td class="mono"><%= approval.worker_host || "local" %></td>
+                  <td class="table-actions">
+                    <.link patch={page_path(:approvals, Map.put(@guardrail_filters, "selected", approval.id))} class="inline-link">
+                      Inspect
+                    </.link>
+                  </td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        <% end %>
+      </DashboardComponents.section_frame>
+
+      <%!-- Approval detail (full width) --%>
+      <%= approval_detail(assigns) %>
+
+      <%!-- Collapsible sections — each gets its own full-width row --%>
+      <%= active_overrides_panel(assigns) %>
+      <%= guardrail_rules_panel(assigns) %>
     </section>
     """
   end
 
-  attr :setting, :map, required: true
-  attr :operator_authenticated, :boolean, default: false
+  attr(:setting, :map, required: true)
+  attr(:operator_authenticated, :boolean, default: false)
 
   defp runtime_setting_control(assigns) do
     ~H"""
-    <article class="setting-card">
-      <div class="setting-card-head">
-        <div>
-          <p class="setting-card-title"><%= @setting.label || @setting.path %></p>
-          <p class="setting-card-meta mono"><%= @setting.path %></p>
+    <DashboardComponents.disclosure_panel
+      title={@setting.label || @setting.path}
+      copy={@setting.path}
+      class="setting-disclosure"
+    >
+      <:meta>
+        <div class="setting-summary-meta">
+          <span class={state_badge_class(@setting.source || "default")}>
+            <%= @setting.source_label || @setting.source || "default" %>
+          </span>
+          <span class="summary-chip"><%= @setting.apply_mode || "immediate" %></span>
+          <span class="summary-chip summary-chip-value"><%= setting_value_preview(@setting.effective_value) %></span>
         </div>
-        <span class={state_badge_class(@setting.source || "default")}>
-          <%= @setting.source_label || @setting.source || "default" %>
-        </span>
+      </:meta>
+
+      <div class="stack-sm">
+        <p class="setting-card-copy"><%= @setting.description %></p>
+
+        <DashboardComponents.key_value_list
+          class="setting-card-details"
+          items={[
+            %{label: "Applies", value: @setting.apply_mode || "immediate"},
+            %{label: "Current", value: pretty_value(@setting.effective_value)},
+            %{label: "Workflow", value: pretty_value(@setting.workflow_value)},
+            %{label: "Default", value: pretty_value(@setting.default_value)}
+          ]}
+        />
+
+        <form phx-submit="update_runtime_setting" class="stack-sm">
+          <input type="hidden" name="path" value={@setting.path} />
+          <%= runtime_setting_input(%{setting: @setting}) %>
+          <div class="button-row">
+            <button type="submit" class="primary-button" disabled={!@operator_authenticated} phx-disable-with="Applying...">
+              Apply
+            </button>
+            <button
+              type="button"
+              class="secondary-button"
+              phx-click="reset_runtime_setting"
+              phx-value-path={@setting.path}
+              disabled={!@operator_authenticated}
+              phx-disable-with="Resetting..."
+            >
+              Reset
+            </button>
+          </div>
+        </form>
       </div>
-
-      <p class="setting-card-copy"><%= @setting.description %></p>
-
-      <DashboardComponents.key_value_list
-        class="setting-card-details"
-        items={[
-          %{label: "Applies", value: @setting.apply_mode || "immediate"},
-          %{label: "Current", value: pretty_value(@setting.effective_value)},
-          %{label: "Workflow", value: pretty_value(@setting.workflow_value)},
-          %{label: "Default", value: pretty_value(@setting.default_value)}
-        ]}
-      />
-
-      <form phx-submit="update_runtime_setting" class="stack-sm">
-        <input type="hidden" name="path" value={@setting.path} />
-        <%= runtime_setting_input(%{setting: @setting}) %>
-        <div class="button-row">
-          <button type="submit" class="primary-button" disabled={!@operator_authenticated} phx-disable-with="Applying...">
-            Apply
-          </button>
-          <button
-            type="button"
-            class="secondary-button"
-            phx-click="reset_runtime_setting"
-            phx-value-path={@setting.path}
-            disabled={!@operator_authenticated}
-            phx-disable-with="Resetting..."
-          >
-            Reset
-          </button>
-        </div>
-      </form>
-    </article>
+    </DashboardComponents.disclosure_panel>
     """
   end
 
-  attr :setting, :map, required: true
-  attr :operator_authenticated, :boolean, default: false
+  attr(:setting, :map, required: true)
+  attr(:operator_authenticated, :boolean, default: false)
 
   defp github_setting_control(assigns) do
     ~H"""
-    <article class="setting-card">
-      <div class="setting-card-head">
-        <div>
-          <p class="setting-card-title"><%= @setting.label || @setting.path %></p>
-          <p class="setting-card-meta mono"><%= @setting.path %></p>
+    <DashboardComponents.disclosure_panel
+      title={@setting.label || @setting.path}
+      copy={@setting.path}
+      class="setting-disclosure"
+    >
+      <:meta>
+        <div class="setting-summary-meta">
+          <span class={state_badge_class(@setting.source || "default")}>
+            <%= @setting.source_label || @setting.source || "default" %>
+          </span>
+          <span class="summary-chip"><%= @setting.apply_mode || "next workspace hook" %></span>
+          <span class="summary-chip summary-chip-value"><%= setting_value_preview(@setting.effective_value) %></span>
         </div>
-        <span class={state_badge_class(@setting.source || "default")}>
-          <%= @setting.source_label || @setting.source || "default" %>
-        </span>
+      </:meta>
+
+      <div class="stack-sm">
+        <p class="setting-card-copy"><%= @setting.description %></p>
+
+        <DashboardComponents.key_value_list
+          class="setting-card-details"
+          items={[
+            %{label: "Applies", value: @setting.apply_mode || "next workspace hook"},
+            %{label: "Current", value: pretty_value(@setting.effective_value)},
+            %{label: "Environment", value: pretty_value(@setting.env_value)},
+            %{label: "Default", value: pretty_value(@setting.default_value)}
+          ]}
+        />
+
+        <form phx-submit="update_github_access_setting" class="stack-sm">
+          <input type="hidden" name="path" value={@setting.path} />
+          <div class="field-group">
+            <label class="field-label" for={"github-setting-#{@setting.path}"}>Value</label>
+            <input
+              id={"github-setting-#{@setting.path}"}
+              name="value"
+              type={github_setting_input_type(@setting)}
+              value={editable_value_string(@setting)}
+              class="field-input"
+              disabled={!@operator_authenticated}
+            />
+          </div>
+          <div class="button-row">
+            <button type="submit" class="primary-button" disabled={!@operator_authenticated} phx-disable-with="Applying...">
+              Apply
+            </button>
+            <button
+              type="button"
+              class="secondary-button"
+              phx-click="reset_github_access_setting"
+              phx-value-path={@setting.path}
+              disabled={!@operator_authenticated}
+              phx-disable-with="Resetting..."
+            >
+              Reset
+            </button>
+          </div>
+        </form>
       </div>
-
-      <p class="setting-card-copy"><%= @setting.description %></p>
-
-      <DashboardComponents.key_value_list
-        class="setting-card-details"
-        items={[
-          %{label: "Applies", value: @setting.apply_mode || "next workspace hook"},
-          %{label: "Current", value: pretty_value(@setting.effective_value)},
-          %{label: "Environment", value: pretty_value(@setting.env_value)},
-          %{label: "Default", value: pretty_value(@setting.default_value)}
-        ]}
-      />
-
-      <form phx-submit="update_github_access_setting" class="stack-sm">
-        <input type="hidden" name="path" value={@setting.path} />
-        <div class="field-group">
-          <label class="field-label" for={"github-setting-#{@setting.path}"}>Value</label>
-          <input
-            id={"github-setting-#{@setting.path}"}
-            name="value"
-            type={github_setting_input_type(@setting)}
-            value={editable_value_string(@setting)}
-            class="field-input"
-            disabled={!@operator_authenticated}
-          />
-        </div>
-        <div class="button-row">
-          <button type="submit" class="primary-button" disabled={!@operator_authenticated} phx-disable-with="Applying...">
-            Apply
-          </button>
-          <button
-            type="button"
-            class="secondary-button"
-            phx-click="reset_github_access_setting"
-            phx-value-path={@setting.path}
-            disabled={!@operator_authenticated}
-            phx-disable-with="Resetting..."
-          >
-            Reset
-          </button>
-        </div>
-      </form>
-    </article>
+    </DashboardComponents.disclosure_panel>
     """
   end
 
   defp settings_page(assigns) do
     ~H"""
-    <section class="dashboard-grid dashboard-grid-main">
-      <div class="stack-lg">
-        <%= operator_access_panel(assigns) %>
-
+    <section class="stack-lg">
+      <%!-- Row 1: Codex auth + GitHub token side by side --%>
+      <section class="settings-top-grid">
         <DashboardComponents.section_frame
           kicker="Codex auth"
           title="Device login"
-          copy="Start a device-code login flow inside the running environment and finish the browser step from any machine."
+          copy="Start a device-code login flow and finish the browser step from any machine."
         >
-          <section class="split-grid-tight">
-            <DashboardComponents.key_value_list
-              items={[
-                %{label: "Phase", value: @payload.codex_auth.phase || "unknown"},
-                %{label: "Status", value: @payload.codex_auth.status_summary || "status unknown"},
-                %{label: "Authenticated", value: yes_no_label(@payload.codex_auth.authenticated)},
-                %{label: "Last checked", value: @payload.codex_auth.status_checked_at || "n/a"},
-                %{label: "Started", value: @payload.codex_auth.started_at || "n/a"},
-                %{label: "Completed", value: @payload.codex_auth.completed_at || "n/a"}
-              ]}
-            />
+          <DashboardComponents.key_value_list
+            items={[
+              %{label: "Phase", value: @payload.codex_auth.phase || "unknown"},
+              %{label: "Status", value: @payload.codex_auth.status_summary || "status unknown"},
+              %{label: "Authenticated", value: yes_no_label(@payload.codex_auth.authenticated)},
+              %{label: "Last checked", value: @payload.codex_auth.status_checked_at || "n/a"}
+            ]}
+          />
 
-            <div class="stack-sm">
-              <%= if @payload.codex_auth.verification_uri do %>
-                <div class="list-card">
-                  <p class="list-card-title">Verification URL</p>
-                  <p class="mono-wrap"><%= @payload.codex_auth.verification_uri %></p>
-                  <DashboardComponents.copy_button label="Copy URL" value={@payload.codex_auth.verification_uri} />
-                </div>
-              <% end %>
-
-              <%= if @payload.codex_auth.user_code do %>
-                <div class="list-card">
-                  <p class="list-card-title">User code</p>
-                  <p class="mono-wrap"><%= @payload.codex_auth.user_code %></p>
-                  <DashboardComponents.copy_button label="Copy Code" value={@payload.codex_auth.user_code} />
-                </div>
-              <% end %>
-
-              <div class="button-row">
-                <button type="button" class="secondary-button" phx-click="refresh_codex_auth_status">Refresh status</button>
-                <button type="button" class="primary-button" phx-click="start_codex_device_auth" disabled={!@operator_authenticated} phx-disable-with="Starting...">Start login</button>
-                <button type="button" class="secondary-button" phx-click="cancel_codex_device_auth" disabled={!@operator_authenticated} phx-disable-with="Cancelling...">Cancel flow</button>
-              </div>
-            </div>
-          </section>
-        </DashboardComponents.section_frame>
-
-        <DashboardComponents.section_frame
-          kicker="GitHub workspace access"
-          title="Repo bootstrap and landing"
-          copy="Manage the repository URL and Git identity used by workspace hooks without editing Docker env files."
-        >
-          <%= if @payload.github_access_error do %>
-            <DashboardComponents.empty_state title="GitHub access unavailable" copy={"GitHub access settings are unavailable: #{@payload.github_access_error}"} />
-          <% else %>
-            <section class="settings-card-grid">
-              <.github_setting_control :for={setting <- @payload.github_access.settings} setting={setting} operator_authenticated={@operator_authenticated} />
-            </section>
-          <% end %>
-        </DashboardComponents.section_frame>
-
-        <DashboardComponents.section_frame
-          id="runtime-settings"
-          kicker="Runtime controls"
-          title="UI-managed settings"
-          copy="Selected runtime knobs can be changed here without editing WORKFLOW.md or restarting the process."
-        >
-          <%= if @payload.settings_error do %>
-            <DashboardComponents.empty_state title="Runtime settings unavailable" copy={"Runtime settings are unavailable: #{@payload.settings_error}"} />
-          <% else %>
-            <div :for={{group, settings} <- grouped_settings(@payload.settings)} class="stack-md">
-              <div class="section-inline-header">
-                <div>
-                  <p class="subsection-heading"><%= group %></p>
-                  <p class="subsection-copy"><%= length(settings) %> editable setting<%= plural(length(settings)) %></p>
-                </div>
-              </div>
-              <section class="settings-card-grid">
-                <.runtime_setting_control :for={setting <- settings} setting={setting} operator_authenticated={@operator_authenticated} />
-              </section>
+          <%= if @payload.codex_auth.verification_uri do %>
+            <div class="stack-sm mt-3">
+              <p class="field-label">Verification URL</p>
+              <p class="mono-wrap text-sm"><%= @payload.codex_auth.verification_uri %></p>
+              <DashboardComponents.copy_button label="Copy URL" value={@payload.codex_auth.verification_uri} />
             </div>
           <% end %>
-        </DashboardComponents.section_frame>
-      </div>
 
-      <aside class="stack-lg">
+          <%= if @payload.codex_auth.user_code do %>
+            <div class="stack-sm mt-2">
+              <p class="field-label">User code</p>
+              <p class="mono-wrap text-sm font-semibold"><%= @payload.codex_auth.user_code %></p>
+              <DashboardComponents.copy_button label="Copy Code" value={@payload.codex_auth.user_code} />
+            </div>
+          <% end %>
+
+          <div class="button-row mt-3">
+            <button type="button" class="secondary-button" phx-click="refresh_codex_auth_status">Refresh status</button>
+            <button type="button" class="primary-button" phx-click="start_codex_device_auth" disabled={!@operator_authenticated} phx-disable-with="Starting...">Start login</button>
+            <button type="button" class="secondary-button" phx-click="cancel_codex_device_auth" disabled={!@operator_authenticated} phx-disable-with="Cancelling...">Cancel flow</button>
+          </div>
+        </DashboardComponents.section_frame>
+
         <DashboardComponents.section_frame
           kicker="GitHub secret"
           title="Write-only token"
-          copy="Store a GitHub token for clone, fetch, push, and optional GitHub tracker auth without exposing it back through the UI."
+          copy="Store a GitHub token for clone, fetch, push, and optional GitHub tracker auth."
         >
           <%= if @payload.github_access_error do %>
             <DashboardComponents.empty_state title="Token metadata unavailable" copy="GitHub token metadata could not be loaded." />
@@ -924,7 +884,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
               ]}
             />
 
-            <form phx-submit="set_github_access_token" class="stack-sm">
+            <form phx-submit="set_github_access_token" class="stack-sm" class="mt-3">
               <div class="field-group">
                 <label for="github-token" class="field-label">GitHub token</label>
                 <input id="github-token" type="password" name="token" value="" autocomplete="new-password" class="field-input" disabled={!@operator_authenticated} />
@@ -936,7 +896,58 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </form>
           <% end %>
         </DashboardComponents.section_frame>
+      </section>
 
+      <%!-- Full width: GitHub workspace settings --%>
+      <DashboardComponents.section_frame
+        kicker="GitHub workspace access"
+        title="Repo bootstrap and landing"
+        copy="Manage the repository URL and Git identity used by workspace hooks without editing Docker env files."
+        collapsible={true}
+        open={true}
+      >
+        <%= if @payload.github_access_error do %>
+          <DashboardComponents.empty_state title="GitHub access unavailable" copy={"GitHub access settings are unavailable: #{@payload.github_access_error}"} />
+        <% else %>
+          <ul class="settings-card-grid card-list">
+            <li :for={setting <- @payload.github_access.settings}>
+              <.github_setting_control setting={setting} operator_authenticated={@operator_authenticated} />
+            </li>
+          </ul>
+        <% end %>
+      </DashboardComponents.section_frame>
+
+      <%!-- Full width: Runtime settings --%>
+      <DashboardComponents.section_frame
+        id="runtime-settings"
+        kicker="Runtime controls"
+        title="UI-managed settings"
+        copy="Selected runtime knobs can be changed here without editing WORKFLOW.md or restarting the process."
+        collapsible={true}
+        open={true}
+      >
+        <%= if @payload.settings_error do %>
+          <DashboardComponents.empty_state title="Runtime settings unavailable" copy={"Runtime settings are unavailable: #{@payload.settings_error}"} />
+        <% else %>
+          <div class="stack-sm">
+            <DashboardComponents.disclosure_panel
+              :for={{group, settings} <- grouped_settings(@payload.settings)}
+              title={group}
+              copy={"#{length(settings)} editable setting#{plural(length(settings))}"}
+              class="settings-group-panel"
+            >
+              <ul class="settings-card-grid card-list">
+                <li :for={setting <- settings}>
+                  <.runtime_setting_control setting={setting} operator_authenticated={@operator_authenticated} />
+                </li>
+              </ul>
+            </DashboardComponents.disclosure_panel>
+          </div>
+        <% end %>
+      </DashboardComponents.section_frame>
+
+      <%!-- Bottom row: Audit + Posture side by side --%>
+      <section class="settings-bottom-grid">
         <DashboardComponents.section_frame
           kicker="Settings audit"
           title="Recent changes"
@@ -945,20 +956,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <%= if recent_operator_changes(@payload) == [] do %>
             <DashboardComponents.empty_state title="No operator changes yet" copy="Runtime and GitHub changes will appear here once they are applied." />
           <% else %>
-            <div class="stack-sm">
-              <div :for={entry <- recent_operator_changes(@payload)} class="list-card">
+            <ul class="stack-sm card-list">
+              <li :for={entry <- recent_operator_changes(@payload)} class="list-card">
                 <div class="list-card-head"><strong><%= entry["action"] || "update" %></strong><span class="mono"><%= entry["recorded_at"] || "n/a" %></span></div>
                 <p class="list-card-copy"><%= Enum.join(entry["paths"] || [], ", ") %></p>
                 <p class="muted-copy"><%= entry["actor"] || "operator" %><%= if blank_to_nil(entry["reason"]), do: " / #{entry["reason"]}", else: "" %></p>
-              </div>
-            </div>
+              </li>
+            </ul>
           <% end %>
         </DashboardComponents.section_frame>
 
         <DashboardComponents.section_frame
           kicker="Safety posture"
           title="Operator posture"
-          copy="A compact readout of approval pressure, active overrides, and current auth state."
+          copy="Approval pressure, active overrides, and current auth state."
         >
           <DashboardComponents.key_value_list
             items={[
@@ -969,26 +980,26 @@ defmodule SymphonyElixirWeb.DashboardLive do
             ]}
           />
         </DashboardComponents.section_frame>
-      </aside>
+      </section>
     </section>
     """
   end
 
   defp runs_page(assigns) do
     ~H"""
-    <section class="dashboard-grid dashboard-grid-main">
-      <div class="stack-lg">
+    <section class="stack-lg">
         <DashboardComponents.section_frame
           kicker="Search and audit"
           title="Run explorer"
           copy="Search completed runs by issue, status, efficiency signal, or workspace metadata."
         >
           <form phx-change="update_run_filters" class="stack-md">
+            <input type="hidden" name="view" value={@run_view} />
             <DashboardComponents.filter_toolbar
               label="Filter runs"
               copy="Share the current audit slice through URL params without storing server-side views."
             >
-              <div class="field-group">
+              <div class="field-group field-group-search">
                 <label for="run-filter-query" class="field-label">Search</label>
                 <input id="run-filter-query" type="search" name="q" value={@run_filters["q"]} class="field-input" />
               </div>
@@ -1014,18 +1025,16 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </select>
               </div>
 
-              <div class="field-group">
-                <label for="run-filter-view" class="field-label">View</label>
-                <select id="run-filter-view" name="view" class="field-select">
-                  <option value="history" selected={@run_view == "history"}>History</option>
-                  <option value="expensive" selected={@run_view == "expensive"}>Expensive runs</option>
-                  <option value="cheap" selected={@run_view == "cheap"}>Cheap wins</option>
-                  <option value="rollups" selected={@run_view == "rollups"}>Issue efficiency</option>
-                </select>
-              </div>
-
               <:actions>
-                <button type="button" class="secondary-button" phx-click="clear_run_filters">Reset filters</button>
+                <div class="toolbar-actions-stack">
+                  <div class="segmented-control" role="tablist" aria-label="Run views">
+                    <.link patch={page_path(:runs, Map.put(@run_filters, "view", "history"))} class={run_view_link_class(@run_view == "history")}>History</.link>
+                    <.link patch={page_path(:runs, Map.put(@run_filters, "view", "expensive"))} class={run_view_link_class(@run_view == "expensive")}>Expensive</.link>
+                    <.link patch={page_path(:runs, Map.put(@run_filters, "view", "cheap"))} class={run_view_link_class(@run_view == "cheap")}>Cheap wins</.link>
+                    <.link patch={page_path(:runs, Map.put(@run_filters, "view", "rollups"))} class={run_view_link_class(@run_view == "rollups")}>Issue efficiency</.link>
+                  </div>
+                  <button type="button" class="secondary-button" phx-click="clear_run_filters">Reset filters</button>
+                </div>
               </:actions>
             </DashboardComponents.filter_toolbar>
           </form>
@@ -1036,6 +1045,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <% else %>
               <div class="table-scroll">
                 <table class="data-table">
+                  <caption class="sr-only">Issue efficiency rollups with latest status, run count, average runtime, total tokens, and efficiency signals</caption>
                   <thead>
                     <tr><th>Issue</th><th>Latest</th><th>Runs</th><th>Avg runtime</th><th>Total tokens</th><th>Signals</th></tr>
                   </thead>
@@ -1058,6 +1068,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <% else %>
               <div class="table-scroll">
                 <table class="data-table">
+                  <caption class="sr-only">Persisted runs with status, timing, token usage, efficiency, git context, and link to run details</caption>
                   <thead>
                     <tr><th>Issue</th><th>Status</th><th>Ended</th><th>Runtime</th><th>Tokens</th><th>Efficiency</th><th>Git</th><th></th></tr>
                   </thead>
@@ -1069,7 +1080,19 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <td class="numeric"><%= format_duration_ms(run["duration_ms"]) %></td>
                       <td class="numeric"><div class="cell-stack"><span class="cell-primary"><%= format_int(get_in(run, ["tokens", "total_tokens"]) || 0) %></span><span class="cell-secondary">uncached <%= format_int(get_in(run, ["tokens", "uncached_input_tokens"]) || 0) %></span></div></td>
                       <td><div class="cell-stack"><span class={efficiency_badge_class(get_in(run, ["efficiency", "classification"]))}><%= efficiency_label(run) %></span><span class="cell-secondary"><%= efficiency_flags_label(run) %></span></div></td>
-                      <td><div class="cell-stack"><span class="cell-primary"><%= run_git_label(run) %></span><span class="cell-secondary"><%= run_changed_files_label(run) %></span></div></td>
+                      <td>
+                        <div class="cell-stack">
+                          <span class="cell-primary"><%= run_git_label(run) %></span>
+                          <span class="cell-secondary"><%= run_changed_files_label(run) %></span>
+                          <details class="table-inline-disclosure">
+                            <summary class="table-inline-summary">More context</summary>
+                            <div class="table-inline-body">
+                              <p class="mono-wrap"><%= run["workspace_path"] || "n/a" %></p>
+                              <p class="muted-copy">session <%= run["session_id"] || "n/a" %></p>
+                            </div>
+                          </details>
+                        </div>
+                      </td>
                       <td class="table-actions"><.link href={run_path(run)} class="inline-link">Run details</.link></td>
                     </tr>
                   </tbody>
@@ -1078,39 +1101,37 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <% end %>
           <% end %>
         </DashboardComponents.section_frame>
-      </div>
 
-      <aside class="stack-lg">
-        <DashboardComponents.section_frame kicker="Efficiency watchlist" title="Expensive runs" copy="Recent persisted runs that look meaningfully expensive, not just large because of cached context.">
+        <%!-- Collapsible sections — each gets its own full-width row --%>
+        <DashboardComponents.section_frame kicker="Efficiency watchlist" title="Expensive runs" copy="Recent persisted runs that look meaningfully expensive, not just large because of cached context." collapsible={true} open={@run_view == "expensive" or @run_view == "history"}>
           <%= if @payload.expensive_runs == [] do %>
             <DashboardComponents.empty_state title="No expensive runs" copy="No recent expensive runs were detected." />
           <% else %>
-            <div class="stack-sm">
-              <div :for={run <- @payload.expensive_runs} class="list-card">
+            <ul class="stack-sm card-list">
+              <li :for={run <- @payload.expensive_runs} class="list-card">
                 <div class="list-card-head"><strong><%= run["issue_identifier"] %></strong><span class={efficiency_badge_class(get_in(run, ["efficiency", "classification"]))}><%= efficiency_label(run) %></span></div>
                 <p class="list-card-copy"><%= efficiency_flags_label(run) %></p>
-                <p class="muted-copy">uncached <%= format_int(get_in(run, ["tokens", "uncached_input_tokens"]) || 0) %> · retry <%= run["retry_attempt"] || 0 %></p>
+                <p class="muted-copy">uncached <%= format_int(get_in(run, ["tokens", "uncached_input_tokens"]) || 0) %> / retry <%= run["retry_attempt"] || 0 %></p>
                 <.link href={run_path(run)} class="inline-link">Run details</.link>
-              </div>
-            </div>
+              </li>
+            </ul>
           <% end %>
         </DashboardComponents.section_frame>
 
-        <DashboardComponents.section_frame kicker="Cheap wins" title="Cheap wins" copy="Runs that landed useful changes with low uncached spend.">
+        <DashboardComponents.section_frame kicker="Cheap wins" title="Cheap wins" copy="Runs that landed useful changes with low uncached spend." collapsible={true} open={@run_view == "cheap" or @run_view == "history"}>
           <%= if @payload.cheap_wins == [] do %>
             <DashboardComponents.empty_state title="No cheap wins yet" copy="Runs flagged as efficient will appear here." />
           <% else %>
-            <div class="stack-sm">
-              <div :for={run <- @payload.cheap_wins} class="list-card">
+            <ul class="stack-sm card-list">
+              <li :for={run <- @payload.cheap_wins} class="list-card">
                 <div class="list-card-head"><strong><%= run["issue_identifier"] %></strong><span class={efficiency_badge_class(get_in(run, ["efficiency", "classification"]))}><%= efficiency_label(run) %></span></div>
                 <p class="list-card-copy"><%= run_changed_files_label(run) %></p>
                 <p class="muted-copy">total <%= format_int(get_in(run, ["tokens", "total_tokens"]) || 0) %></p>
                 <.link href={run_path(run)} class="inline-link">Run details</.link>
-              </div>
-            </div>
+              </li>
+            </ul>
           <% end %>
         </DashboardComponents.section_frame>
-      </aside>
     </section>
     """
   end
@@ -1145,7 +1166,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp approval_detail(assigns) do
     ~H"""
     <%= if @selected_approval do %>
-      <DashboardComponents.section_frame kicker="Focused review" title={@selected_approval.issue_identifier} copy={@selected_approval.summary || "approval pending operator review"}>
+      <DashboardComponents.section_frame kicker="Focused review" title={@selected_approval.issue_identifier} copy={@selected_approval.summary || "approval pending operator review"} class="approval-workbench">
         <DashboardComponents.key_value_list
           items={[
             %{label: "Risk", value: @selected_approval.risk_level || "review"},
@@ -1156,23 +1177,38 @@ defmodule SymphonyElixirWeb.DashboardLive do
           ]}
         />
 
-        <%= if approval_detail_preview(@selected_approval) != [] do %>
-          <div class="stack-sm"><p class="subsection-heading">Context preview</p><ul class="detail-list"><li :for={line <- approval_detail_preview(@selected_approval)}><%= line %></li></ul></div>
-        <% end %>
-
-        <%= if get_in(@selected_approval, [:explanation, "evaluation", "reason"]) do %>
-          <div class="list-card"><p class="list-card-title">Policy explanation</p><p class="list-card-copy"><%= get_in(@selected_approval, [:explanation, "evaluation", "reason"]) %></p></div>
-        <% end %>
-
         <%= if @selected_approval.session_id do %>
           <div class="button-row"><DashboardComponents.copy_button label="Copy Session ID" value={@selected_approval.session_id} /></div>
         <% end %>
+
+        <%= if approval_detail_preview(@selected_approval) != [] do %>
+          <DashboardComponents.disclosure_panel title="Context preview" copy="Command, cwd, and path details captured for this review." open={true}>
+            <ul class="detail-list"><li :for={line <- approval_detail_preview(@selected_approval)}><%= line %></li></ul>
+          </DashboardComponents.disclosure_panel>
+        <% end %>
+
+        <%= if get_in(@selected_approval, [:explanation, "evaluation", "reason"]) do %>
+          <DashboardComponents.disclosure_panel title="Policy explanation" copy="Why the policy engine requested operator review.">
+            <p class="list-card-copy"><%= get_in(@selected_approval, [:explanation, "evaluation", "reason"]) %></p>
+          </DashboardComponents.disclosure_panel>
+        <% end %>
+
+        <DashboardComponents.disclosure_panel title="Raw approval details" copy="Structured metadata, fingerprint, and persisted request payload.">
+          <DashboardComponents.key_value_list
+            items={[
+              %{label: "Fingerprint", value: @selected_approval.fingerprint || "n/a"},
+              %{label: "Method", value: @selected_approval.method || "n/a"},
+              %{label: "Session", value: @selected_approval.session_id || "n/a"}
+            ]}
+          />
+          <pre class="code-panel code-panel-compact"><%= pretty_value(@selected_approval.details || %{}) %></pre>
+        </DashboardComponents.disclosure_panel>
 
         <form phx-submit="guardrail_decide" class="stack-sm">
           <input type="hidden" name="approval_id" value={@selected_approval.id} />
           <div class="field-group">
             <label for="approval-reason" class="field-label">Decision note</label>
-            <textarea id="approval-reason" name="reason" rows="3" class="field-textarea" placeholder="Optional context for the audit log"></textarea>
+            <textarea id="approval-reason" name="reason" rows="4" class="field-textarea" placeholder="Optional context for the audit log"></textarea>
           </div>
           <div class="button-row">
             <button type="submit" class="primary-button" name="decision" value="allow_once" disabled={!@operator_authenticated} phx-disable-with="Allowing...">Allow once</button>
@@ -1182,10 +1218,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </div>
         </form>
 
-        <div class="button-row">
-          <button :if={@selected_approval.run_id} type="button" class="secondary-button" phx-click="enable_run_full_access" phx-value-run_id={@selected_approval.run_id} disabled={!@operator_authenticated} phx-disable-with="Enabling...">Full access for run</button>
-          <button type="button" class="secondary-button" phx-click="enable_workflow_full_access" disabled={!@operator_authenticated} phx-disable-with="Enabling...">Full access for workflow</button>
-        </div>
+        <DashboardComponents.disclosure_panel title="Override access posture" copy="Escalate access only if the underlying rule or one-time decision is insufficient.">
+          <div class="button-row">
+            <button :if={@selected_approval.run_id} type="button" class="secondary-button" phx-click="enable_run_full_access" phx-value-run_id={@selected_approval.run_id} disabled={!@operator_authenticated} phx-disable-with="Enabling...">Full access for run</button>
+            <button type="button" class="secondary-button" phx-click="enable_workflow_full_access" disabled={!@operator_authenticated} phx-disable-with="Enabling...">Full access for workflow</button>
+          </div>
+        </DashboardComponents.disclosure_panel>
       </DashboardComponents.section_frame>
     <% else %>
       <DashboardComponents.section_frame kicker="Focused review" title="Select an approval" copy="Pick an approval from the queue to inspect its command context, explanation, and available operator actions.">
@@ -1201,6 +1239,8 @@ defmodule SymphonyElixirWeb.DashboardLive do
       kicker="Safety posture"
       title="Active overrides"
       copy="Run-scoped and workflow-wide full-access overrides currently weakening the default guardrail posture."
+      collapsible={true}
+      open={@payload.guardrail_overrides != []}
     >
       <%= if @payload.guardrail_overrides == [] do %>
         <DashboardComponents.empty_state
@@ -1210,6 +1250,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <% else %>
         <div class="table-scroll">
           <table class="data-table data-table-compact">
+            <caption class="sr-only">Active full-access overrides with scope, reason, created time, expiry, and disable action</caption>
             <thead>
               <tr>
                 <th>Scope</th>
@@ -1270,6 +1311,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       kicker="Policy"
       title="Guardrail rules"
       copy="Persisted rules that shape approval decisions and long-lived access posture."
+      collapsible={true}
     >
       <%= if @payload.guardrail_rules == [] do %>
         <DashboardComponents.empty_state
@@ -1279,6 +1321,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       <% else %>
         <div class="table-scroll">
           <table class="data-table data-table-compact">
+            <caption class="sr-only">Persisted guardrail rules with scope, action, state, description, remaining uses, and operator actions</caption>
             <thead>
               <tr>
                 <th>Scope</th>
@@ -1304,10 +1347,13 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 <td><span class="mono"><%= guardrail_value(rule, :action_type) || "n/a" %></span></td>
                 <td><span class={state_badge_class(lifecycle_state)}><%= lifecycle_state %></span></td>
                 <td>
-                  <div class="cell-stack">
-                    <strong class="cell-primary"><%= guardrail_value(rule, :description) || "guardrail rule" %></strong>
-                    <span class="cell-secondary mono"><%= pretty_value(guardrail_value(rule, :match)) %></span>
-                  </div>
+                  <DashboardComponents.disclosure_panel
+                    title={guardrail_value(rule, :description) || "guardrail rule"}
+                    copy="Open to inspect the persisted rule match payload."
+                    class="table-disclosure"
+                  >
+                    <pre class="code-panel code-panel-compact"><%= pretty_value(guardrail_value(rule, :match)) %></pre>
+                  </DashboardComponents.disclosure_panel>
                 </td>
                 <td class="numeric"><%= remaining_uses_label(guardrail_value(rule, :remaining_uses)) %></td>
                 <td class="table-actions">
@@ -1511,6 +1557,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
     end
   end
 
+  defp run_view_link_class(true), do: "segment-link segment-link-current"
+  defp run_view_link_class(false), do: "segment-link"
+
   defp rebuild_page_state(socket, params) do
     payload = socket.assigns.payload
     guardrail_filters = normalize_guardrail_filters(params)
@@ -1692,7 +1741,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp select_approval([], _selected), do: nil
   defp select_approval(approvals, ""), do: List.first(sort_approvals(approvals))
   defp select_approval(approvals, nil), do: List.first(sort_approvals(approvals))
-  defp select_approval(approvals, selected_id) when is_list(approvals), do: Enum.find(approvals, &to_string(&1.id) == to_string(selected_id)) || List.first(sort_approvals(approvals))
+  defp select_approval(approvals, selected_id) when is_list(approvals), do: Enum.find(approvals, &(to_string(&1.id) == to_string(selected_id))) || List.first(sort_approvals(approvals))
 
   defp sort_approvals(approvals) do
     Enum.sort_by(approvals, fn approval -> {-risk_sort_key(approval.risk_level), approval.requested_at || "", approval.issue_identifier || ""} end)
@@ -1745,7 +1794,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp selected_approval?(selected, approval), do: to_string(selected.id) == to_string(approval.id)
 
   defp recent_operator_changes(payload) do
-    (payload.settings_history || []) ++ (get_in(payload, [:github_access, :history]) || [])
+    ((payload.settings_history || []) ++ (get_in(payload, [:github_access, :history]) || []))
     |> Enum.sort_by(&(&1["recorded_at"] || ""), :desc)
     |> Enum.take(6)
   end
@@ -1865,7 +1914,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
     completed_runtime_seconds(payload) + Enum.reduce(payload.running || [], 0, fn entry, total -> total + runtime_seconds_from_started_at(entry.started_at, now) end)
   end
 
-  defp format_runtime_and_turns(started_at, turn_count, now) when is_integer(turn_count) and turn_count > 0, do: "#{format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))} / #{turn_count}"
+  defp format_runtime_and_turns(started_at, turn_count, now) when is_integer(turn_count) and turn_count > 0,
+    do: "#{format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))} / #{turn_count}"
+
   defp format_runtime_and_turns(started_at, _turn_count, now), do: format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))
 
   defp format_runtime_seconds(seconds) when is_number(seconds) do
@@ -1894,7 +1945,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp format_int(_value), do: "n/a"
 
   defp state_badge_class(state) do
-    base = "state-badge"
+    base = "state-badge state-badge-neutral"
     normalized = state |> to_string() |> String.downcase()
 
     cond do
@@ -1961,7 +2012,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp rate_limit_focus(rate_limits) when is_map(rate_limits) do
     primary = Map.get(rate_limits, "primary") || Map.get(rate_limits, :primary)
-    case primary do %{"remaining" => remaining} when is_integer(remaining) -> "Primary remaining #{remaining}"; %{remaining: remaining} when is_integer(remaining) -> "Primary remaining #{remaining}"; _ -> "No structured rate-limit snapshot" end
+
+    case primary do
+      %{"remaining" => remaining} when is_integer(remaining) -> "Primary remaining #{remaining}"
+      %{remaining: remaining} when is_integer(remaining) -> "Primary remaining #{remaining}"
+      _ -> "No structured rate-limit snapshot"
+    end
   end
 
   defp rate_limit_focus(_rate_limits), do: "No structured rate-limit snapshot"
@@ -1992,6 +2048,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp efficiency_watch_label(_expensive_runs, _cheap_wins), do: "No recent efficiency outliers"
+
   defp system_health_level(payload) do
     case payload_counts(payload) do
       counts when counts.retrying > 0 or counts.pending_approvals > 0 -> :warning
@@ -1999,6 +2056,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       _ -> :idle
     end
   end
+
   defp retry_sort_value(nil), do: {{9999, 12, 31}, {23, 59, 59}, 999_999}
 
   defp retry_sort_value(value) when is_binary(value) do
@@ -2013,7 +2071,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
     branch = git["branch"]
     head_commit = git["head_commit"]
     head_subject = git["head_subject"]
-    cond do is_binary(branch) and is_binary(head_commit) and is_binary(head_subject) -> "#{branch} @ #{String.slice(head_commit, 0, 8)} (#{head_subject})"; is_binary(branch) and is_binary(head_commit) -> "#{branch} @ #{String.slice(head_commit, 0, 8)}"; is_binary(branch) -> branch; is_binary(head_commit) -> String.slice(head_commit, 0, 8); true -> "n/a" end
+
+    cond do
+      is_binary(branch) and is_binary(head_commit) and is_binary(head_subject) -> "#{branch} @ #{String.slice(head_commit, 0, 8)} (#{head_subject})"
+      is_binary(branch) and is_binary(head_commit) -> "#{branch} @ #{String.slice(head_commit, 0, 8)}"
+      is_binary(branch) -> branch
+      is_binary(head_commit) -> String.slice(head_commit, 0, 8)
+      true -> "n/a"
+    end
   end
 
   defp run_git_label(_run), do: "n/a"
@@ -2022,8 +2087,21 @@ defmodule SymphonyElixirWeb.DashboardLive do
     git = get_in(run, ["workspace_metadata", "git"]) || %{}
     changed_files = git["changed_files"] || []
     changed_file_count = git["changed_file_count"] || length(changed_files)
-    paths = changed_files |> Enum.flat_map(fn %{"path" => path} when is_binary(path) -> [path]; _ -> [] end) |> Enum.take(3)
-    cond do changed_file_count == 0 -> "no changed files"; paths == [] -> "#{changed_file_count} file(s)"; changed_file_count > length(paths) -> "#{Enum.join(paths, ", ")} (+#{changed_file_count - length(paths)} more)"; true -> Enum.join(paths, ", ") end
+
+    paths =
+      changed_files
+      |> Enum.flat_map(fn
+        %{"path" => path} when is_binary(path) -> [path]
+        _ -> []
+      end)
+      |> Enum.take(3)
+
+    cond do
+      changed_file_count == 0 -> "no changed files"
+      paths == [] -> "#{changed_file_count} file(s)"
+      changed_file_count > length(paths) -> "#{Enum.join(paths, ", ")} (+#{changed_file_count - length(paths)} more)"
+      true -> Enum.join(paths, ", ")
+    end
   end
 
   defp run_changed_files_label(_run), do: "n/a"
@@ -2032,12 +2110,14 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp efficiency_label(_value), do: "Normal"
   defp efficiency_flags_label(%{"efficiency" => %{"flags" => flags}}), do: efficiency_flags_label(flags)
   defp efficiency_flags_label(%{"flags" => flags}), do: efficiency_flags_label(flags)
+
   defp efficiency_flags_label(flags) when is_list(flags) do
     case Enum.map(flags, &humanize_efficiency_flag/1) do
       [] -> "no advisory flags"
       values -> Enum.join(values, ", ")
     end
   end
+
   defp efficiency_flags_label(_flags), do: "no advisory flags"
   defp humanize_efficiency_flag("high_uncached_input"), do: "high uncached input"
   defp humanize_efficiency_flag("high_tokens_per_changed_file"), do: "high tokens / file"
@@ -2053,7 +2133,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp efficiency_badge_class("context_window_heavy"), do: "state-badge state-badge-warning"
   defp efficiency_badge_class("cheap_win"), do: "state-badge state-badge-active"
   defp efficiency_badge_class("cheap_wins"), do: "state-badge state-badge-active"
-  defp efficiency_badge_class(_classification), do: "state-badge"
+  defp efficiency_badge_class(_classification), do: "state-badge state-badge-neutral"
   defp attention_card_class(true), do: "surface-card attention-card attention-card-alert"
   defp attention_card_class(false), do: "surface-card attention-card"
 
@@ -2174,6 +2254,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       trimmed -> trimmed
     end
   end
+
   defp blank_to_nil(_value), do: nil
   defp blank_to_empty(value) when is_binary(value), do: String.trim(value)
   defp blank_to_empty(_value), do: ""
@@ -2181,11 +2262,26 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp pretty_value(value) when is_binary(value), do: value
   defp pretty_value(value), do: inspect(value, pretty: true, limit: :infinity)
 
+  defp setting_value_preview(value) do
+    value
+    |> pretty_value()
+    |> to_string()
+    |> String.replace(~r/\s+/, " ")
+    |> String.trim()
+    |> truncate_text(48)
+  end
+
   defp grouped_settings(settings) when is_list(settings) do
     settings |> Enum.group_by(& &1.group) |> Enum.sort_by(fn {group, _settings} -> group end)
   end
 
   defp grouped_settings(_settings), do: []
+
+  defp truncate_text(value, max) when is_binary(value) and byte_size(value) > max do
+    String.slice(value, 0, max - 3) <> "..."
+  end
+
+  defp truncate_text(value, _max), do: value
   defp filter_match?(_value, nil), do: true
   defp filter_match?(_value, ""), do: true
   defp filter_match?(value, expected) when is_binary(expected), do: normalize_filter_value(value) == normalize_filter_value(expected)
@@ -2193,7 +2289,22 @@ defmodule SymphonyElixirWeb.DashboardLive do
   defp filter_query_match?(_approval, ""), do: true
 
   defp filter_query_match?(approval, query) when is_map(approval) and is_binary(query) do
-    haystack = [approval.issue_identifier, approval.summary, approval.reason, approval.fingerprint, approval.action_type, approval.method, approval.worker_host, approval.workspace_path, inspect(approval.details || %{}, limit: :infinity)] |> Enum.reject(&is_nil/1) |> Enum.join(" ") |> String.downcase()
+    haystack =
+      [
+        approval.issue_identifier,
+        approval.summary,
+        approval.reason,
+        approval.fingerprint,
+        approval.action_type,
+        approval.method,
+        approval.worker_host,
+        approval.workspace_path,
+        inspect(approval.details || %{}, limit: :infinity)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> Enum.join(" ")
+      |> String.downcase()
+
     String.contains?(haystack, normalize_filter_value(query))
   end
 

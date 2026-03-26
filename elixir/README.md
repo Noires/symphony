@@ -12,9 +12,32 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 > this directory are the recommended default. Host-local runs remain available for development and
 > debugging, but should be treated as a secondary fallback, especially on Windows.
 
-## Screenshot
+## Dashboard
 
-![Symphony Elixir screenshot](../.github/media/elixir-screenshot.png)
+Symphony includes a real-time operator dashboard for monitoring agent sessions, approving guardrail-blocked actions, reviewing run efficiency, and tuning runtime settings.
+
+### Overview — dark mode
+![Overview dark](../.github/media/elixir-overview-dark.png)
+
+### Overview — light mode
+![Overview light](../.github/media/elixir-overview-light.png)
+
+<details>
+<summary>More screenshots</summary>
+
+### Approval Control
+![Approvals](../.github/media/elixir-approvals.png)
+
+### Run Intelligence
+![Runs](../.github/media/elixir-runs.png)
+
+### Runtime Settings
+![Settings](../.github/media/elixir-settings.png)
+
+### Run Detail
+![Run detail](../.github/media/elixir-run-detail.png)
+
+</details>
 
 ## How it works
 

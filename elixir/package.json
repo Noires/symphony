@@ -2,12 +2,15 @@
   "name": "symphony-elixir-ui-visual",
   "private": true,
   "scripts": {
+    "build:dashboard-css": "tailwindcss -i ./assets/dashboard.css -o ./priv/static/dashboard.css --minify",
+    "build:dashboard-css:watch": "tailwindcss -i ./assets/dashboard.css -o ./priv/static/dashboard.css --watch",
     "install:ui-browsers": "playwright install chromium",
-    "test:ui-visual": "playwright test",
-    "test:ui-visual:headed": "playwright test --headed",
-    "test:ui-visual:update": "playwright test --update-snapshots"
+    "test:ui-visual": "npm run build:dashboard-css && playwright test",
+    "test:ui-visual:headed": "npm run build:dashboard-css && playwright test --headed",
+    "test:ui-visual:update": "npm run build:dashboard-css && playwright test --update-snapshots"
   },
   "devDependencies": {
-    "@playwright/test": "1.58.2"
+    "@playwright/test": "1.58.2",
+    "tailwindcss": "^3.4.17"
   }
 }

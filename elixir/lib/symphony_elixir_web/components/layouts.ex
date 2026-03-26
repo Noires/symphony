@@ -12,13 +12,16 @@ defmodule SymphonyElixirWeb.Layouts do
 
     ~H"""
     <!DOCTYPE html>
-    <html lang="en">
+    <html lang="en" data-theme="dark">
       <head>
         <meta charset="utf-8" />
         <meta name="viewport" content="width=device-width, initial-scale=1" />
         <meta name="csrf-token" content={@csrf_token} />
-        <meta name="theme-color" content="#f6f7fb" />
+        <meta name="theme-color" content="#06080e" />
         <title>Symphony Control Surface</title>
+        <link rel="preconnect" href="https://fonts.googleapis.com" />
+        <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+        <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
         <script>
           (function () {
             try {
@@ -27,7 +30,7 @@ defmodule SymphonyElixirWeb.Layouts do
               var resolvedTheme = storedTheme || systemTheme;
               document.documentElement.dataset.theme = resolvedTheme;
             } catch (_error) {
-              document.documentElement.dataset.theme = "light";
+              document.documentElement.dataset.theme = "dark";
             }
           })();
         </script>
@@ -45,7 +48,7 @@ defmodule SymphonyElixirWeb.Layouts do
 
             var themeMeta = document.querySelector("meta[name='theme-color']");
             if (themeMeta) {
-              themeMeta.setAttribute("content", theme === "dark" ? "#0f1720" : "#f6f7fb");
+              themeMeta.setAttribute("content", theme === "dark" ? "#06080e" : "#f8f9fc");
             }
 
             var toggleButtons = document.querySelectorAll("[data-theme-toggle]");
@@ -88,7 +91,7 @@ defmodule SymphonyElixirWeb.Layouts do
           }
 
           function syncUiChrome() {
-            setTheme(document.documentElement.dataset.theme || "light");
+            setTheme(document.documentElement.dataset.theme || "dark");
             wireUtilityButtons();
           }
 
@@ -124,9 +127,9 @@ defmodule SymphonyElixirWeb.Layouts do
   def app(assigns) do
     ~H"""
     <a class="skip-link" href="#main-content">Skip to main content</a>
-    <div class="app-shell">
+    <div class="command-shell">
       <DashboardComponents.flash_group flash={assigns[:flash] || %{}} />
-      <main id="main-content" class="app-main">
+      <main id="main-content">
         {@inner_content}
       </main>
     </div>

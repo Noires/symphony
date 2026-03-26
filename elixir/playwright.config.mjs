@@ -3,8 +3,8 @@ import { defineConfig, devices } from '@playwright/test';
 const port = Number(process.env.UI_VISUAL_PORT || 4101);
 const command =
   process.platform === 'win32'
-    ? `set UI_VISUAL_PORT=${port}&& mise exec -- mix run --no-halt scripts/ui_visual_server.exs`
-    : `UI_VISUAL_PORT=${port} mise exec -- mix run --no-halt scripts/ui_visual_server.exs`;
+    ? `npm run build:dashboard-css && set UI_VISUAL_PORT=${port}&& mise exec -- mix run --no-halt scripts/ui_visual_server.exs`
+    : `npm run build:dashboard-css && UI_VISUAL_PORT=${port} mise exec -- mix run --no-halt scripts/ui_visual_server.exs`;
 
 export default defineConfig({
   testDir: './ui-visual',
