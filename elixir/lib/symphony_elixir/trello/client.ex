@@ -130,6 +130,13 @@ defmodule SymphonyElixir.Trello.Client do
     end
   end
 
+  @spec fetch_codex_workpad_action_id(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def fetch_codex_workpad_action_id(card_id) when is_binary(card_id) do
+    with {:ok, actions} <- fetch_card_actions(card_id) do
+      {:ok, find_codex_workpad_action_id(actions)}
+    end
+  end
+
   @spec request(atom() | String.t(), String.t(), map(), term(), keyword()) ::
           {:ok, map() | list() | String.t()} | {:error, term()}
   def request(method, path, query \\ %{}, body \\ nil, opts \\ [])
@@ -232,6 +239,21 @@ defmodule SymphonyElixir.Trello.Client do
       {:ok, _unexpected} -> {:error, :trello_unknown_payload}
       {:error, reason} -> {:error, reason}
     end
+  end
+
+  defp find_codex_workpad_action_id(actions) when is_list(actions) do
+    Enum.find_value(actions, fn
+      %{"type" => "commentCard", "id" => action_id} = action when is_binary(action_id) ->
+        text =
+          action
+          |> Map.get("data", %{})
+          |> Map.get("text")
+
+        if codex_workpad_comment?(text), do: action_id, else: nil
+
+      _ ->
+        nil
+    end)
   end
 
   defp fetch_board_lists(board_id) when is_binary(board_id) do
@@ -679,6 +701,15 @@ defmodule SymphonyElixir.Trello.Client do
 
     String.starts_with?(normalized, "## codex ")
   end
+
+  defp codex_workpad_comment?(text) when is_binary(text) do
+    text
+    |> String.trim_leading()
+    |> String.downcase()
+    |> String.starts_with?("## codex workpad")
+  end
+
+  defp codex_workpad_comment?(_text), do: false
 
   defp truncate_excerpt(text) when is_binary(text) do
     trimmed = String.trim(text)

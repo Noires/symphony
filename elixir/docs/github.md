@@ -17,7 +17,6 @@ tracker:
     - KI
     - In Progress
     - Rework
-    - Merging
   terminal_states:
     - Done
     - Cancelled
@@ -40,24 +39,22 @@ Minimum recommended setup:
 3. `In Progress`
 4. `Human Review`
 5. `Rework`
-6. `Merging`
-7. `Done`
-8. `Cancelled`
+6. `Done`
+7. `Cancelled`
 
 Recommended meanings:
 
 - `Backlog`: parking lot for work that should not be picked up yet.
 - `KI`: intake queue for issues that Symphony may claim.
 - `In Progress`: active implementation.
-- `Human Review`: waiting for human review, approval, or unblock input. Keep this state out of `active_states`.
+- `Human Review`: waiting for human review, unblock input, or human merge of the already-open PR. Keep this state out of `active_states`.
 - `Rework`: follow-up work after review feedback.
-- `Merging`: approved and being landed.
 - `Done`: terminal success state.
 - `Cancelled`: terminal non-success state.
 
 ## Suggested state mapping
 
-- Active states: `KI`, `In Progress`, `Rework`, `Merging`
+- Active states: `KI`, `In Progress`, `Rework`
 - Non-active states: `Backlog`, `Human Review`
 - Terminal states: `Done`, `Cancelled`
 

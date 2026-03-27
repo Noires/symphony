@@ -634,9 +634,9 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert {:ok, _workspace} = Workspace.create_for_issue("MT-HOOKS")
       assert length(String.split(String.trim(File.read!(after_create_counter)), "\n")) == 1
 
-      issue = %Issue{id: "issue-hooks", identifier: "MT-HOOKS", state: "Merging"}
+      issue = %Issue{id: "issue-hooks", identifier: "MT-HOOKS", state: "In Progress"}
       assert :ok = Workspace.run_after_success_hook(workspace, issue)
-      assert File.read!(after_success_marker) == "issue-hooks|MT-HOOKS|Merging|#{workspace}\n"
+      assert File.read!(after_success_marker) == "issue-hooks|MT-HOOKS|In Progress|#{workspace}\n"
 
       assert :ok = Workspace.remove_issue_workspaces("MT-HOOKS")
       assert File.read!(before_remove_marker) == "before_remove\n"

@@ -43,6 +43,11 @@ defmodule SymphonyElixir.Trello.Adapter do
     client_module().fetch_human_response_marker(issue_id, opts)
   end
 
+  @spec fetch_codex_workpad_action_id(String.t()) :: {:ok, String.t() | nil} | {:error, term()}
+  def fetch_codex_workpad_action_id(issue_id) when is_binary(issue_id) do
+    client_module().fetch_codex_workpad_action_id(issue_id)
+  end
+
   defp client_module do
     Application.get_env(:symphony_elixir, :trello_client_module, Client)
   end

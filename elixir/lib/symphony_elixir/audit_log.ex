@@ -833,30 +833,32 @@ defmodule SymphonyElixir.AuditLog do
   end
 
   defp persist_update(%{issue_identifier: issue_identifier, run_id: run_id} = context, summary_updates, event, opts \\ []) do
-    replace? = Keyword.get(opts, :replace?, false)
-    run_dir = run_dir(issue_identifier, run_id)
-    :ok = File.mkdir_p(run_dir)
+    with_run_lock(context, fn ->
+      replace? = Keyword.get(opts, :replace?, false)
+      run_dir = run_dir(issue_identifier, run_id)
+      :ok = File.mkdir_p(run_dir)
 
-    if is_map(event) do
-      line = Jason.encode!(event) <> "\n"
-      :ok = File.write(events_path(issue_identifier, run_id), line, [:append])
-    end
-
-    current_summary =
-      if replace? do
-        %{}
-      else
-        read_summary_file(summary_path(issue_identifier, run_id)) || %{}
+      if is_map(event) do
+        line = Jason.encode!(event) <> "\n"
+        :ok = File.write(events_path(issue_identifier, run_id), line, [:append])
       end
 
-    summary =
-      current_summary
-      |> deep_merge(sanitize_value(summary_updates))
-      |> apply_event_to_summary(event)
-      |> derive_summary_metrics()
-      |> ensure_identity_fields(context)
+      current_summary =
+        if replace? do
+          %{}
+        else
+          read_summary_file(summary_path(issue_identifier, run_id)) || %{}
+        end
 
-    :ok = File.write(summary_path(issue_identifier, run_id), Jason.encode_to_iodata!(summary, pretty: true))
+      summary =
+        current_summary
+        |> deep_merge(sanitize_value(summary_updates))
+        |> apply_event_to_summary(event)
+        |> derive_summary_metrics()
+        |> ensure_identity_fields(context)
+
+      :ok = File.write(summary_path(issue_identifier, run_id), Jason.encode_to_iodata!(summary, pretty: true))
+    end)
   rescue
     exception ->
       log_persist_exception("persist audit update", issue_identifier, exception)
@@ -925,6 +927,11 @@ defmodule SymphonyElixir.AuditLog do
     summary
     |> Map.put_new("issue_identifier", issue_identifier)
     |> Map.put_new("run_id", run_id)
+  end
+
+  defp with_run_lock(%{issue_identifier: issue_identifier, run_id: run_id}, fun)
+       when is_binary(issue_identifier) and is_binary(run_id) and is_function(fun, 0) do
+    :global.trans({__MODULE__, :run_update, issue_identifier, run_id}, fun)
   end
 
   defp terminal_event_name("completed"), do: "run_completed"
@@ -1452,6 +1459,14 @@ defmodule SymphonyElixir.AuditLog do
   end
 
   defp changed_files_label(_run), do: nil
+
+  defp diff_summary_label(run) when is_map(run) do
+    run
+    |> get_in(["workspace_metadata", "git", "diff_summary"])
+    |> normalize_optional_string()
+  end
+
+  defp diff_summary_label(_run), do: nil
 
   defp hook_results_label(hook_results) when is_map(hook_results) do
     labels =
@@ -2099,21 +2114,28 @@ defmodule SymphonyElixir.AuditLog do
   defp build_prompt_handoff(nil), do: nil
 
   defp build_prompt_handoff(run) when is_map(run) do
+    changed_files = changed_files_label(run) || "none"
+    git_label = run_git_label(run)
+    diff_summary = diff_summary_label(run)
+    hook_results = hook_results_label(Map.get(run, "hook_results"))
+    last_error = handoff_last_error_label(run)
+
     lines =
       [
         "- Previous run: #{Map.get(run, "run_id") || "n/a"}",
         "- Status: #{Map.get(run, "status") || "n/a"}",
         "- Tracker state: #{summary_state_transition(Map.get(run, "issue_state_started"), Map.get(run, "issue_state_finished"), Map.get(run, "tracker_transition") || %{}) || "n/a"}",
-        "- Changed files: #{changed_files_label(run) || "none"}",
-        "- Validation/hooks: #{hook_results_label(Map.get(run, "hook_results")) || "n/a"}",
-        "- Tokens: #{tokens_label(Map.get(run, "tokens") || %{})}",
+        git_label && "- Git: #{git_label}",
+        diff_summary && "- Diff: #{diff_summary}",
+        "- Changed files: #{changed_files}",
+        hook_results && "- Validation/hooks: #{hook_results}",
         "- Next action: #{Map.get(run, "next_action") || "n/a"}",
-        "- Last error: #{Map.get(run, "last_error") || "none"}"
+        last_error && "- Last error: #{last_error}"
       ]
 
     text =
       lines
-      |> Enum.reject(&String.ends_with?(&1, "n/a"))
+      |> Enum.reject(&(&1 in [nil, false] or String.ends_with?(&1, "n/a")))
       |> Enum.join("\n")
 
     if text == "" do
@@ -2125,6 +2147,64 @@ defmodule SymphonyElixir.AuditLog do
         changed_file_count: latest_changed_file_count(run),
         status: Map.get(run, "status")
       }
+    end
+  end
+
+  defp handoff_last_error_label(run) when is_map(run) do
+    run
+    |> Map.get("last_error")
+    |> compact_handoff_error(run)
+  end
+
+  defp handoff_last_error_label(_run), do: nil
+
+  defp compact_handoff_error(nil, _run), do: nil
+
+  defp compact_handoff_error(error, run) when is_binary(error) and is_map(run) do
+    cond do
+      String.contains?(error, "Refusing automatic landing with dirty working tree") ->
+        changed_files = changed_files_label(run)
+
+        if is_binary(changed_files) do
+          "after_success refused landing because the working tree was dirty (#{changed_files})"
+        else
+          "after_success refused landing because the working tree was dirty"
+        end
+
+      String.contains?(error, "workspace_hook_timeout") ->
+        "workspace hook timed out"
+
+      String.contains?(error, "workspace_hook_failed") ->
+        error
+        |> String.split("}, [{")
+        |> List.first()
+        |> String.replace(~r/^agent exited:\s*/, "")
+        |> String.replace(~r/\s+/, " ")
+        |> String.trim()
+        |> truncate_handoff_line()
+
+      true ->
+        error
+        |> String.split("}, [{")
+        |> List.first()
+        |> String.split("\n")
+        |> List.first()
+        |> String.replace(~r/^agent exited:\s*/, "")
+        |> String.replace(~r/\s+/, " ")
+        |> String.trim()
+        |> truncate_handoff_line()
+    end
+  end
+
+  defp compact_handoff_error(_error, _run), do: nil
+
+  defp truncate_handoff_line(nil), do: nil
+
+  defp truncate_handoff_line(line) when is_binary(line) do
+    if String.length(line) > 220 do
+      String.slice(line, 0, 217) <> "..."
+    else
+      line
     end
   end
 

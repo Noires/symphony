@@ -17,7 +17,6 @@ defmodule SymphonyElixir.GitHubAccessTest do
     previous_author_email = System.get_env("GIT_AUTHOR_EMAIL")
     previous_committer_name = System.get_env("GIT_COMMITTER_NAME")
     previous_committer_email = System.get_env("GIT_COMMITTER_EMAIL")
-    previous_landing_mode = System.get_env("SYMPHONY_GITHUB_LANDING_MODE")
 
     Application.put_env(:symphony_elixir, :audit_root, audit_root)
 
@@ -34,7 +33,6 @@ defmodule SymphonyElixir.GitHubAccessTest do
       restore_env("GIT_AUTHOR_EMAIL", previous_author_email)
       restore_env("GIT_COMMITTER_NAME", previous_committer_name)
       restore_env("GIT_COMMITTER_EMAIL", previous_committer_email)
-      restore_env("SYMPHONY_GITHUB_LANDING_MODE", previous_landing_mode)
 
       File.rm_rf(audit_root)
     end)
@@ -63,8 +61,7 @@ defmodule SymphonyElixir.GitHubAccessTest do
                %{
                  "source_repo_url" => "https://github.com/example/updated.git",
                  "git_author_name" => "Operator Name",
-                 "git_author_email" => "operator@example.com",
-                 "landing_mode" => "pull_request"
+                 "git_author_email" => "operator@example.com"
                },
                actor: "test",
                reason: "switch repository"
@@ -72,9 +69,6 @@ defmodule SymphonyElixir.GitHubAccessTest do
 
     assert Enum.find(payload.settings, &(&1.path == "source_repo_url")).effective_value ==
              "https://github.com/example/updated.git"
-
-    assert Enum.find(payload.settings, &(&1.path == "landing_mode")).effective_value ==
-             "pull_request"
 
     assert payload.token.configured == true
     assert payload.token.source == "env"
@@ -127,7 +121,6 @@ defmodule SymphonyElixir.GitHubAccessTest do
         printf '%s\n' "$GIT_AUTHOR_EMAIL" >> github-access.txt
         printf '%s\n' "$GIT_COMMITTER_NAME" >> github-access.txt
         printf '%s\n' "$GIT_COMMITTER_EMAIL" >> github-access.txt
-        printf '%s\n' "$SYMPHONY_GITHUB_LANDING_MODE" >> github-access.txt
         printf '%s\n' "$SYMPHONY_GITHUB_TOKEN_FILE" >> github-access.txt
         """
       )
@@ -139,8 +132,7 @@ defmodule SymphonyElixir.GitHubAccessTest do
                    "git_author_name" => "Workspace Author",
                    "git_author_email" => "workspace@author.invalid",
                    "git_committer_name" => "Workspace Committer",
-                   "git_committer_email" => "workspace@committer.invalid",
-                   "landing_mode" => "pull_request"
+                   "git_committer_email" => "workspace@committer.invalid"
                  },
                  actor: "test"
                )
@@ -161,7 +153,6 @@ defmodule SymphonyElixir.GitHubAccessTest do
                "workspace@author.invalid",
                "Workspace Committer",
                "workspace@committer.invalid",
-               "pull_request",
                GitHubAccess.token_file_path()
              ]
     after

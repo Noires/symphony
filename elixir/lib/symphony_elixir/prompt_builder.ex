@@ -4,6 +4,7 @@ defmodule SymphonyElixir.PromptBuilder do
   """
 
   alias SymphonyElixir.{AuditLog, Config, Workflow}
+  alias SymphonyElixir.Trello.Adapter, as: TrelloAdapter
 
   @default_compact_issue_description_chars 1_200
   @render_opts [strict_variables: true, strict_filters: true]
@@ -25,11 +26,12 @@ defmodule SymphonyElixir.PromptBuilder do
       |> prompt_template!()
       |> default_prompt()
 
+    settings = Config.settings!()
     template = parse_template!(template_source)
     raw_description = issue_description(issue)
 
     {prompt_description, description_metadata} =
-      prepare_issue_description(raw_description, Config.settings!().agent)
+      prepare_issue_description(raw_description, settings.agent)
 
     issue_for_prompt =
       issue
@@ -47,8 +49,13 @@ defmodule SymphonyElixir.PromptBuilder do
         template_source
       )
 
-    handoff = maybe_prompt_handoff(issue, opts)
-    prompt = append_handoff(rendered_prompt, handoff)
+    handoff = maybe_prompt_handoff(issue, opts, settings.agent.handoff_summary_enabled == true)
+    tracker_runtime_context = maybe_tracker_runtime_context(issue, settings.tracker.kind)
+
+    prompt =
+      rendered_prompt
+      |> append_handoff(handoff)
+      |> append_tracker_runtime_context(tracker_runtime_context)
 
     %{
       prompt: prompt,
@@ -63,7 +70,8 @@ defmodule SymphonyElixir.PromptBuilder do
         "issue_description_truncated_chars" => Map.get(description_metadata, "issue_description_truncated_chars", 0),
         "included_previous_run_handoff" => handoff != nil,
         "previous_run_id" => handoff && handoff.run_id,
-        "previous_run_handoff_chars" => if(handoff, do: byte_size(handoff.text), else: 0)
+        "previous_run_handoff_chars" => if(handoff, do: byte_size(handoff.text), else: 0),
+        "tracker_runtime_context_chars" => if(tracker_runtime_context, do: byte_size(tracker_runtime_context), else: 0)
       }
     }
   end
@@ -161,23 +169,45 @@ defmodule SymphonyElixir.PromptBuilder do
     end
   end
 
-  defp maybe_prompt_handoff(%{identifier: issue_identifier}, opts) when is_binary(issue_identifier) do
-    if Config.settings!().agent.handoff_summary_enabled == true do
-      current_run_id = Keyword.get(opts, :run_id)
+  defp maybe_prompt_handoff(%{identifier: issue_identifier}, opts, true) when is_binary(issue_identifier) do
+    current_run_id = Keyword.get(opts, :run_id)
 
-      case AuditLog.prompt_handoff(issue_identifier, current_run_id: current_run_id) do
-        {:ok, %{text: text} = handoff} when is_binary(text) and text != "" -> handoff
-        _ -> nil
-      end
+    case AuditLog.prompt_handoff(issue_identifier, current_run_id: current_run_id) do
+      {:ok, %{text: text} = handoff} when is_binary(text) and text != "" -> handoff
+      _ -> nil
     end
   end
 
-  defp maybe_prompt_handoff(_issue, _opts), do: nil
+  defp maybe_prompt_handoff(_issue, _opts, _enabled), do: nil
 
   defp append_handoff(prompt, nil), do: prompt
 
   defp append_handoff(prompt, %{text: handoff_text}) when is_binary(prompt) and is_binary(handoff_text) do
     prompt <> "\n\nPrevious run handoff:\n" <> handoff_text
+  end
+
+  defp maybe_tracker_runtime_context(%{id: issue_id}, "trello") when is_binary(issue_id) do
+    case TrelloAdapter.fetch_codex_workpad_action_id(issue_id) do
+      {:ok, action_id} when is_binary(action_id) and action_id != "" ->
+        [
+          "Trello runtime hint:",
+          "- Existing `## Codex Workpad` comment action id: `#{action_id}`.",
+          "- Prefer `PUT /actions/#{action_id}` to update that comment instead of listing card actions again."
+        ]
+        |> Enum.join("\n")
+
+      _ ->
+        nil
+    end
+  end
+
+  defp maybe_tracker_runtime_context(_issue, _tracker_kind), do: nil
+
+  defp append_tracker_runtime_context(prompt, nil), do: prompt
+
+  defp append_tracker_runtime_context(prompt, tracker_runtime_context)
+       when is_binary(prompt) and is_binary(tracker_runtime_context) do
+    prompt <> "\n\n" <> tracker_runtime_context
   end
 
   defp tracker_payload_chars(issue) do

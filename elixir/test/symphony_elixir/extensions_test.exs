@@ -89,6 +89,15 @@ defmodule SymphonyElixir.ExtensionsTest do
         result -> result
       end
     end
+
+    def fetch_codex_workpad_action_id(issue_id) do
+      notify({:trello_fetch_codex_workpad_action_id_called, issue_id})
+
+      case Process.get({__MODULE__, :workpad_action_id_result}) do
+        nil -> {:ok, nil}
+        result -> result
+      end
+    end
   end
 
   defmodule FakeGitHubClient do
@@ -546,6 +555,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:ok, %{"kind" => "comment"}} = TrelloAdapter.fetch_human_response_marker("card-1", since: ~U[2026-03-24 12:00:00Z])
     assert_receive {:trello_fetch_human_response_marker_called, "card-1", marker_opts}
     assert Keyword.has_key?(marker_opts, :since)
+
+    Process.put({FakeTrelloClient, :workpad_action_id_result}, {:ok, "action-99"})
+    assert {:ok, "action-99"} = TrelloAdapter.fetch_codex_workpad_action_id("card-1")
+    assert_receive {:trello_fetch_codex_workpad_action_id_called, "card-1"}
   end
 
   test "github adapter delegates reads and validates mutation responses" do
@@ -1650,20 +1663,6 @@ defmodule SymphonyElixir.ExtensionsTest do
 
       Enum.find(payload.settings, &(&1.path == "source_repo_url")).effective_value ==
         "https://github.com/example/updated-repo.git"
-    end)
-
-    github_landing_html =
-      render_submit(view, "update_github_access_setting", %{
-        "path" => "landing_mode",
-        "value" => "pull_request"
-      })
-
-    assert github_landing_html =~ "GitHub workspace access"
-
-    assert_eventually(fn ->
-      {:ok, payload} = SymphonyElixir.GitHubAccess.payload()
-
-      Enum.find(payload.settings, &(&1.path == "landing_mode")).effective_value == "pull_request"
     end)
 
     token_html =

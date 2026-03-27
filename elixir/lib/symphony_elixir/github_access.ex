@@ -53,15 +53,6 @@ defmodule SymphonyElixir.GitHubAccess do
       default: "symphony@local.invalid",
       apply_mode: "next workspace hook",
       type: :email
-    },
-    "landing_mode" => %{
-      label: "Landing Mode",
-      description: "Whether a Merging run should land directly onto main or create/update a pull request from the issue branch.",
-      env_var: "SYMPHONY_GITHUB_LANDING_MODE",
-      default: "direct_merge",
-      apply_mode: "next workspace hook",
-      type: :enum,
-      options: ["direct_merge", "pull_request"]
     }
   }
 

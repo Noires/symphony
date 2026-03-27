@@ -15,7 +15,6 @@ tracker:
     - KI
     - In Progress
     - Rework
-    - Merging
   terminal_states:
     - Done
     - Cancelled
@@ -40,29 +39,27 @@ Minimum recommended setup:
 3. `In Progress`
 4. `Human Review`
 5. `Rework`
-6. `Merging`
-7. `Done`
-8. `Cancelled`
+6. `Done`
+7. `Cancelled`
 
 Recommended meanings:
 
 - `Backlog`: parking lot for work that should not be picked up yet.
 - `KI`: intake queue for cards that Symphony may claim.
 - `In Progress`: active implementation.
-- `Human Review`: waiting for human review, approval, or unblock input. Keep this list out of `active_states`.
+- `Human Review`: waiting for human review, unblock input, or human merge of the already-open PR. Keep this list out of `active_states`.
 - `Rework`: follow-up work after review feedback.
-- `Merging`: approved and being landed.
-- `Done`: terminal success state.
+- `Done`: terminal success state. With PR landing, a human typically moves the card here after the PR is merged.
 - `Cancelled`: terminal non-success state.
 
 ## Suggested state mapping
 
-- Active lists: `KI`, `In Progress`, `Rework`, `Merging`
+- Active lists: `KI`, `In Progress`, `Rework`
 - Non-active lists: `Backlog`, `Human Review`
 - Terminal lists: `Done`, `Cancelled`
 
 This matches the existing Symphony control flow:
 
 - `KI` is the Trello equivalent of a dispatchable queue.
-- `Human Review` should pause automation rather than trigger new turns.
-- `Rework` and `Merging` remain active so Symphony can continue the loop when a card re-enters automation.
+- `Human Review` should pause automation rather than trigger new turns, including while an attached PR waits for human review or merge.
+- `Rework` remains active so Symphony can continue the loop when a card re-enters automation.

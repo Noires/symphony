@@ -78,6 +78,8 @@ Why this is the supported mode:
    - Linear: create a personal token in Settings -> Security & access -> Personal API keys and set
      `LINEAR_API_KEY`
    - Trello: set `TRELLO_API_KEY`, `TRELLO_API_TOKEN`, and `TRELLO_BOARD_ID`
+     - The bundled Trello workflow now opens and updates GitHub PRs automatically after successful
+       coding runs, so also set `GITHUB_TOKEN`, `GITHUB_OWNER`, and `GITHUB_REPO`.
    - GitHub: set `GITHUB_TOKEN`, `GITHUB_OWNER`, `GITHUB_REPO`, and `GITHUB_PROJECT_NUMBER`
    - Operator-authenticated admin actions: also set `SYMPHONY_OPERATOR_TOKEN`
 4. Use the provided Docker workflow files directly with Compose.
@@ -88,7 +90,7 @@ Why this is the supported mode:
    - To get your project's slug, right-click the project and copy its URL. The slug is part of the
      URL.
    - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: `Rework`, `Human Review`, and `Merging`. You can customize them in
+     issue statuses: `Rework` and `Human Review`. You can customize them in
      Team Settings -> Workflow in Linear.
 7. Follow the instructions below to install the required runtime dependencies and start the service.
 
@@ -127,8 +129,15 @@ This means the workspaces and logs stay persistent across container recreation, 
 to live in a host checkout folder.
 
 Docker mode treats the container as the primary execution boundary. Symphony forces Codex to run
-without in-run approval/resume mechanics in this mode, so operator approvals happen through the
-workflow states (`Human Review`, `Merging`) instead of Codex command/file prompts.
+without in-run approval/resume mechanics in this mode, so operator review happens through the
+workflow state `Human Review` instead of Codex command/file prompts.
+
+The bundled Docker workflows also enable two efficiency defaults:
+
+- `agent.max_issue_description_prompt_chars: 1600` to cap large tracker bodies before they hit the
+  model prompt
+- `agent.handoff_summary_enabled: true` so rework and follow-up runs get a compact previous-run
+  handoff instead of re-deriving context from scratch
 
 The dashboard is exposed on port `4000` by default.
 
@@ -182,6 +191,9 @@ Notes:
   - `approval_policy: never`
   - `thread_sandbox: danger-full-access`
   - `turn_sandbox_policy.type: dangerFullAccess`
+- The bundled Docker workflows set `agent.max_issue_description_prompt_chars: 1600` and
+  `agent.handoff_summary_enabled: true` by default to reduce prompt bloat and make follow-up runs
+  cheaper.
 - Workflow `codex.approval_policy`, `codex.thread_sandbox`, and `codex.turn_sandbox_policy` values
   may still appear in parsed settings, but they are not used at runtime.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
@@ -196,7 +208,7 @@ Notes:
 - For Trello, `tracker.api_key` reads from `TRELLO_API_KEY`, `tracker.api_token` reads from
   `TRELLO_API_TOKEN`, and `tracker.board_id` reads from `TRELLO_BOARD_ID` when unset.
 - Codex command/file approval prompts are not supported. Operator review happens through workflow
-  states such as `Human Review` and `Merging`, not via in-run approval/resume mechanics.
+  states such as `Human Review`, not via in-run approval/resume mechanics.
 - Symphony auto-loads `.env` from the same directory as the active `WORKFLOW.md` file without
   overriding already-exported process environment variables.
 - For path values, `~` is expanded to the home directory.
@@ -338,9 +350,11 @@ Configuration:
 - `SYMPHONY_WORKFLOW_FILE` selects the mounted workflow file
   (`./WORKFLOW.trello.docker.md` or `./WORKFLOW.github.docker.md`)
 - [WORKFLOW.trello.docker.md](WORKFLOW.trello.docker.md) clones from
-  `SYMPHONY_SOURCE_REPO_URL`
+  `SYMPHONY_SOURCE_REPO_URL`, works on an issue branch, and opens or updates a PR automatically
 - [WORKFLOW.github.docker.md](WORKFLOW.github.docker.md) additionally expects
   `GITHUB_OWNER`, `GITHUB_REPO`, and `GITHUB_PROJECT_NUMBER`
+- Trello PR publication also expects `GITHUB_OWNER` and `GITHUB_REPO`, because successful runs
+  create or update a GitHub pull request instead of pushing `main` directly
 - the Docker image configures an in-container Git credential helper for `https://github.com`
   so `GITHUB_TOKEN` is used automatically for clone, fetch, and push inside the container
 - once the stack is running, `/settings` can safely override the repo URL and Git identity, and can

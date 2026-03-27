@@ -720,7 +720,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
     >
       <DashboardComponents.empty_state
         title="Use workflow-state review instead"
-        copy="Human Review and Merging remain the operator approval gates for Docker runs. Continue from the runs view or inspect settings and rules without in-run approval controls."
+        copy="Human Review remains the operator review gate for Docker runs. Continue from the runs view or inspect settings and rules without in-run approval controls."
         action_label="Open runs"
         action_href="/runs"
       />
@@ -1443,7 +1443,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         if(
           approval_controls_supported?(),
           do: "Clear operator-blocked work first, then inspect retries and active sessions.",
-          else: "Inspect retries and active sessions first, then use Human Review or Merging as the approval gates."
+          else: "Inspect retries and active sessions first, then use Human Review as the review gate."
         )
     }
   end
@@ -1469,7 +1469,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
         if(
           approval_controls_supported?(),
           do: "Clear waiting approvals first, then remove stale overrides and tighten rules.",
-          else: "Move work through Human Review and Merging, then inspect run history from the runs view."
+          else: "Move work through Human Review, then inspect run history from the runs view."
         )
     }
   end

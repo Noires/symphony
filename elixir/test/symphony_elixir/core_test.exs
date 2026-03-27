@@ -1,6 +1,17 @@
 defmodule SymphonyElixir.CoreTest do
   use SymphonyElixir.TestSupport
 
+  defmodule PromptBuilderFakeTrelloClient do
+    def fetch_codex_workpad_action_id(issue_id) do
+      send(self(), {:prompt_builder_workpad_lookup, issue_id})
+
+      case Process.get({__MODULE__, :workpad_action_id_result}) do
+        nil -> {:ok, nil}
+        result -> result
+      end
+    end
+  end
+
   test "config defaults and validation checks" do
     write_workflow_file!(Workflow.workflow_file_path(),
       tracker_api_token: nil,
@@ -118,8 +129,8 @@ defmodule SymphonyElixir.CoreTest do
     write_workflow_file!(Workflow.workflow_file_path(), completed_issue_state: " Human Review ")
     assert Config.settings!().agent.completed_issue_state == "Human Review"
 
-    write_workflow_file!(Workflow.workflow_file_path(), completed_issue_state_by_state: %{" Merging " => " Done "})
-    assert Config.settings!().agent.completed_issue_state_by_state == %{"merging" => "Done"}
+    write_workflow_file!(Workflow.workflow_file_path(), completed_issue_state_by_state: %{" Rework " => " Done "})
+    assert Config.settings!().agent.completed_issue_state_by_state == %{"rework" => "Done"}
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_active_states: "Todo,  Review,")
     assert {:error, {:invalid_workflow_config, message}} = Config.validate!()
@@ -969,7 +980,7 @@ defmodule SymphonyElixir.CoreTest do
   end
 
   test "normal worker exit uses state-specific completion target when configured" do
-    issue = %Issue{id: "issue-done", identifier: "MT-558C", state: "Merging"}
+    issue = %Issue{id: "issue-done", identifier: "MT-558C", state: "Rework"}
 
     Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
     Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
@@ -980,7 +991,7 @@ defmodule SymphonyElixir.CoreTest do
       tracker_project_slug: nil,
       continue_on_active_issue: false,
       completed_issue_state: "Human Review",
-      completed_issue_state_by_state: %{"Merging" => "Done"}
+      completed_issue_state_by_state: %{"Rework" => "Done"}
     )
 
     issue_id = issue.id
@@ -1024,63 +1035,8 @@ defmodule SymphonyElixir.CoreTest do
     refute Map.has_key?(state.running, issue_id)
     refute MapSet.member?(state.claimed, issue_id)
     assert MapSet.member?(state.completed, issue_id)
-    assert state.completed_active_states[issue_id] == "merging"
+    assert state.completed_active_states[issue_id] == "rework"
     assert state.retry_attempts == %{}
-  end
-
-  test "normal worker exit returns merging issues to human review when github landing mode is pull_request" do
-    issue = %Issue{id: "issue-pr-review", identifier: "MT-558D", state: "Merging"}
-
-    previous_landing_mode = System.get_env("SYMPHONY_GITHUB_LANDING_MODE")
-    System.put_env("SYMPHONY_GITHUB_LANDING_MODE", "pull_request")
-
-    Application.put_env(:symphony_elixir, :memory_tracker_issues, [issue])
-    Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
-
-    write_workflow_file!(Workflow.workflow_file_path(),
-      tracker_kind: "memory",
-      tracker_api_token: nil,
-      tracker_project_slug: nil,
-      continue_on_active_issue: false,
-      completed_issue_state: "Human Review",
-      completed_issue_state_by_state: %{"Merging" => "Done"}
-    )
-
-    issue_id = issue.id
-    ref = make_ref()
-    orchestrator_name = Module.concat(__MODULE__, :PullRequestLandingModeOrchestrator)
-    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
-
-    on_exit(fn ->
-      restore_env("SYMPHONY_GITHUB_LANDING_MODE", previous_landing_mode)
-      Application.delete_env(:symphony_elixir, :memory_tracker_issues)
-      Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
-
-      if Process.alive?(pid) do
-        Process.exit(pid, :normal)
-      end
-    end)
-
-    initial_state = :sys.get_state(pid)
-
-    running_entry = %{
-      pid: self(),
-      ref: ref,
-      identifier: "MT-558D",
-      issue: issue,
-      started_at: DateTime.utc_now()
-    }
-
-    :sys.replace_state(pid, fn _ ->
-      initial_state
-      |> Map.put(:running, %{issue_id => running_entry})
-      |> Map.put(:claimed, MapSet.new([issue_id]))
-      |> Map.put(:retry_attempts, %{})
-    end)
-
-    send(pid, {:DOWN, ref, :process, self(), :normal})
-
-    assert_receive {:memory_tracker_state_update, ^issue_id, "Human Review"}
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -1606,8 +1562,11 @@ defmodule SymphonyElixir.CoreTest do
                previous_run,
                %{
                  "git" => %{
+                   "branch" => "main",
                    "changed_file_count" => 2,
-                   "changed_files" => [%{"path" => "lib/foo.ex"}, %{"path" => "test/foo_test.exs"}]
+                   "changed_files" => [%{"path" => "lib/foo.ex"}, %{"path" => "test/foo_test.exs"}],
+                   "diff_summary" => "2 file(s), +10/-4",
+                   "head_commit" => "abcdef1234567890"
                  }
                }
              )
@@ -1624,10 +1583,54 @@ defmodule SymphonyElixir.CoreTest do
     assert result.prompt =~ "Previous run handoff:"
     assert result.prompt =~ "Previous run: run-handoff-1"
     assert result.prompt =~ "Changed files: lib/foo.ex, test/foo_test.exs"
+    refute result.prompt =~ "Tokens:"
     assert result.metadata["included_previous_run_handoff"] == true
     assert result.metadata["previous_run_id"] == "run-handoff-1"
     assert result.metadata["previous_run_handoff_chars"] > 0
     assert result.metadata["tracker_payload_chars"] > 0
+  end
+
+  test "prompt builder includes a Trello workpad hint when the workpad action id is known" do
+    previous_client_module = Application.get_env(:symphony_elixir, :trello_client_module)
+
+    on_exit(fn ->
+      if is_nil(previous_client_module) do
+        Application.delete_env(:symphony_elixir, :trello_client_module)
+      else
+        Application.put_env(:symphony_elixir, :trello_client_module, previous_client_module)
+      end
+    end)
+
+    Application.put_env(:symphony_elixir, :trello_client_module, PromptBuilderFakeTrelloClient)
+    Process.put({PromptBuilderFakeTrelloClient, :workpad_action_id_result}, {:ok, "action-44"})
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      tracker_kind: "trello",
+      tracker_endpoint: "https://api.trello.com/1",
+      tracker_api_key: "trello-key",
+      tracker_api_access_token: "trello-token",
+      tracker_board_id: "board-1",
+      tracker_project_slug: nil,
+      prompt: "Ticket {{ issue.identifier }}"
+    )
+
+    issue = %Issue{
+      id: "card-44",
+      identifier: "TR-44",
+      title: "Reuse workpad action id",
+      description: "Keep Trello lookups small",
+      state: "In Progress",
+      url: "https://trello.example/TR-44",
+      labels: []
+    }
+
+    result = PromptBuilder.build_prompt_result(issue)
+
+    assert_receive {:prompt_builder_workpad_lookup, "card-44"}
+    assert result.prompt =~ "Trello runtime hint:"
+    assert result.prompt =~ "Existing `## Codex Workpad` comment action id: `action-44`."
+    assert result.prompt =~ "PUT /actions/action-44"
+    assert result.metadata["tracker_runtime_context_chars"] > 0
   end
 
   test "agent runner keeps workspace after successful codex run" do
@@ -1766,7 +1769,7 @@ defmodule SymphonyElixir.CoreTest do
         identifier: "S-100",
         title: "Surface landing failure",
         description: "Landing hook should fail the run",
-        state: "Merging",
+        state: "In Progress",
         url: "https://example.org/issues/S-100",
         labels: []
       }
